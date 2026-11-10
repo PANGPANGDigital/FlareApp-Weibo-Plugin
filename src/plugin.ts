@@ -202,6 +202,7 @@ defineFlareSocialPlugin({
               "flare.datasource.timeline/v1": ["page"],
               "flare.datasource.tab-catalog/v1": ["page"],
               "flare.datasource.post/v1": ["detail", "context", "mutate", "delete"],
+              "flare.datasource.notification/v1": ["page", "badge"],
               "flare.datasource.compose/v1": ["publish"],
               "flare.datasource.profile/v1": ["byId", "byHandle"],
             },
@@ -405,7 +406,6 @@ defineFlareSocialPlugin({
           ...(retweet ? {
             presentation: {
               quotes: [retweet],
-              repost: retweet,
             },
           } : {}),
         };
@@ -435,7 +435,6 @@ defineFlareSocialPlugin({
                   ...(retweet ? {
                     presentation: {
                       quotes: [retweet],
-                      repost: retweet,
                     },
                   } : {}),
                 });
@@ -590,21 +589,31 @@ defineFlareSocialPlugin({
         if (isComment) {
           // Comment action: Favourite / Unfavourite, Delete
           if (request.action === "Favourite") {
-            await requestFormPost(
+            const res = await requestFormPost(
               context.origin + "/api/likes/update",
               { id: commentId, type: "comment", st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
+            if (!res || !isOkResponse(res.ok)) {
+              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "点赞评论失败。";
+              fail("Remote", msg);
+            }
+            return { type: "noChange" };
           } else if (request.action === "Unfavourite") {
-            await requestFormPost(
+            const res = await requestFormPost(
               context.origin + "/api/likes/destroy",
               { id: commentId, type: "comment", st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
+            if (!res || !isOkResponse(res.ok)) {
+              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "取消点赞评论失败。";
+              fail("Remote", msg);
+            }
+            return { type: "noChange" };
           } else if (request.action === "Delete") {
             await requestFormPost(
               context.origin + "/comments/destroy",
@@ -616,55 +625,49 @@ defineFlareSocialPlugin({
             return { type: "deleted" };
           }
 
-          const isNowLiked = request.action === "Favourite";
-          const updatedPost: PostV1 = {
-            key: request.key,
-            createdAt: new Date().toISOString(),
-            content: { format: "plain", value: "" },
-            replyTo: { id: statusId, host: accountHost(context) },
-            actions: [
-              {
-                action: "Reply",
-                label: "回复",
-                enabled: true,
-              },
-              {
-                action: isNowLiked ? "Unfavourite" : "Favourite",
-                label: isNowLiked ? "已赞" : "赞",
-                enabled: true,
-                active: isNowLiked,
-                actionToken: "comment_" + commentId,
-              },
-            ],
-          };
-          return { type: "updatedPost", post: updatedPost };
+          return { type: "noChange" };
         } else {
           // Status action: Favourite / Unfavourite, Repost, Bookmark / Unbookmark, Delete
           if (request.action === "Favourite") {
-            await requestFormPost(
+            const res = await requestFormPost(
               context.origin + "/api/attitudes/create",
               { id: statusId, attitude: "heart", st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
+            if (!res || !isOkResponse(res.ok)) {
+              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "点赞失败。";
+              fail("Remote", msg);
+            }
+            return { type: "noChange" };
           } else if (request.action === "Unfavourite") {
-            await requestFormPost(
+            const res = await requestFormPost(
               context.origin + "/api/attitudes/destroy",
               { id: statusId, attitude: "heart", st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
+            if (!res || !isOkResponse(res.ok)) {
+              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "取消点赞失败。";
+              fail("Remote", msg);
+            }
+            return { type: "noChange" };
           } else if (request.action === "Repost") {
             const content = request.parameters?.content || "转发微博";
-            await requestFormPost(
+            const res = await requestFormPost(
               context.origin + "/api/statuses/repost",
               { id: statusId, mid: statusId, content, st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
+            if (!res || !isOkResponse(res.ok)) {
+              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "转发失败。";
+              fail("Remote", msg);
+            }
+            return { type: "noChange" };
           } else if (request.action === "Bookmark") {
             await requestFormPost(
               context.origin + "/api/statuses/createfav",
@@ -673,6 +676,7 @@ defineFlareSocialPlugin({
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
+            return { type: "noChange" };
           } else if (request.action === "Unbookmark") {
             await requestFormPost(
               context.origin + "/api/statuses/destroyfav",
@@ -681,6 +685,7 @@ defineFlareSocialPlugin({
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
+            return { type: "noChange" };
           } else if (request.action === "Delete") {
             await requestFormPost(
               context.origin + "/profile/delMyblog",
@@ -692,70 +697,7 @@ defineFlareSocialPlugin({
             return { type: "deleted" };
           }
 
-          try {
-            const updatedData = await fetchSingleStatus(statusId, context, credential.cookies, st);
-            if (updatedData) {
-              const updated = mapTimelinePost(updatedData, context, credential.profile.key.id);
-              if (updated) {
-                if (request.action === "Favourite") {
-                  updated.favouritesCount = (updated.favouritesCount || 0) + 1;
-                  updated.actions = (updated.actions || []).map((a) =>
-                    a.action === "Favourite"
-                      ? { ...a, action: "Unfavourite" as const, label: "已赞", active: true, count: updated.favouritesCount }
-                      : a,
-                  );
-                } else if (request.action === "Unfavourite") {
-                  updated.favouritesCount = Math.max(0, (updated.favouritesCount || 1) - 1);
-                  updated.actions = (updated.actions || []).map((a) =>
-                    a.action === "Unfavourite"
-                      ? { ...a, action: "Favourite" as const, label: "赞", active: false, count: updated.favouritesCount }
-                      : a,
-                  );
-                } else if (request.action === "Repost") {
-                  updated.repostsCount = (updated.repostsCount || 0) + 1;
-                  updated.actions = (updated.actions || []).map((a) =>
-                    a.action === "Repost"
-                      ? { ...a, count: updated.repostsCount }
-                      : a,
-                  );
-                } else if (request.action === "Bookmark") {
-                  updated.actions = (updated.actions || []).map((a) =>
-                    a.action === "Bookmark"
-                      ? { ...a, action: "Unbookmark" as const, label: "已收藏", active: true }
-                      : a,
-                  );
-                } else if (request.action === "Unbookmark") {
-                  updated.actions = (updated.actions || []).map((a) =>
-                    a.action === "Unbookmark"
-                      ? { ...a, action: "Bookmark" as const, label: "收藏", active: false }
-                      : a,
-                  );
-                }
-                return { type: "updatedPost", post: updated };
-              }
-            }
-          } catch {
-            // fallback
-          }
-
-          const isLiked = request.action === "Favourite";
-          const fallbackActions: ActionDescriptorV1[] = [
-            { action: "Repost", label: "转发", enabled: true },
-            { action: "Reply", label: "评论", enabled: true },
-            {
-              action: isLiked ? "Unfavourite" : "Favourite",
-              label: isLiked ? "已赞" : "赞",
-              enabled: true,
-              active: isLiked,
-            },
-          ];
-          const fallbackPost: PostV1 = {
-            key: request.key,
-            createdAt: new Date().toISOString(),
-            content: { format: "plain", value: "" },
-            actions: fallbackActions,
-          };
-          return { type: "updatedPost", post: fallbackPost };
+          return { type: "noChange" };
         }
       },
 
@@ -919,6 +861,238 @@ defineFlareSocialPlugin({
       async byHandle(request, context) {
         const credential = await readCredential();
         return await fetchProfileData(request.handle, context, credential.cookies);
+      },
+    },
+
+    notification: {
+      async page(request, context) {
+        const credential = await readCredential();
+        const currentUserId = credential.profile.key.id;
+        const host = accountHost(context);
+        const filterId = request.filterId || "mention";
+        const cursor = request.page.cursor;
+        const pageNum = cursor ? parseInt(cursor, 10) || 1 : 1;
+        const items: TimelineItemV1[] = [];
+        let hasMore = false;
+
+        if (filterId === "mention") {
+          try {
+            const url = context.origin + "/message/mentionsAt?page=" + pageNum;
+            const res = await requestJson(
+              url,
+              context,
+              credential.cookies,
+              { Referer: context.origin + "/message/at" },
+              false,
+              true,
+            );
+            if (res && isOkResponse(res.ok)) {
+              const list = Array.isArray(res.data)
+                ? (res.data as Record<string, unknown>[])
+                : isRecord(res.data) && Array.isArray((res.data as Record<string, unknown>).statuses)
+                  ? ((res.data as Record<string, unknown>).statuses as Record<string, unknown>[])
+                  : [];
+              if (list.length > 0) {
+                hasMore = true;
+                for (const item of list) {
+                  if (!isRecord(item)) continue;
+                  const post = mapTimelinePost(item, context, currentUserId);
+                  if (!post) continue;
+                  const retweet = isRecord(item.retweeted_status)
+                    ? mapTimelinePost(item.retweeted_status as Record<string, unknown>, context, currentUserId)
+                    : undefined;
+                  items.push({
+                    type: "post",
+                    post,
+                    ...(retweet ? { presentation: { quotes: [retweet] } } : {}),
+                  });
+                }
+              }
+            }
+          } catch {
+            // non-fatal
+          }
+        } else if (filterId === "comment") {
+          try {
+            const url = context.origin + "/message/cmt?page=" + pageNum;
+            const res = await requestJson(
+              url,
+              context,
+              credential.cookies,
+              { Referer: context.origin + "/message/cmt" },
+              false,
+              true,
+            );
+            if (res && isOkResponse(res.ok)) {
+              const list = Array.isArray(res.data)
+                ? (res.data as Record<string, unknown>[])
+                : isRecord(res.data) && Array.isArray((res.data as Record<string, unknown>).comments)
+                  ? ((res.data as Record<string, unknown>).comments as Record<string, unknown>[])
+                  : [];
+              if (list.length > 0) {
+                hasMore = true;
+                for (const c of list) {
+                  if (!isRecord(c)) continue;
+                  const commentId = String(c.idstr || c.id || "");
+                  if (!commentId) continue;
+
+                  const commentUser = isRecord(c.user)
+                    ? mapTimelineProfile(c.user as Record<string, unknown>, context)
+                    : undefined;
+                  const commentUserId = commentUser ? commentUser.key.id : undefined;
+                  const isAuthor = Boolean(currentUserId && commentUserId && currentUserId === commentUserId);
+
+                  const statusObj = isRecord(c.status) ? (c.status as Record<string, unknown>) : undefined;
+                  const statusId = statusObj ? String(statusObj.idstr || statusObj.id || "") : "";
+
+                  const text = typeof c.text === "string" ? htmlToPlainText(c.text) : "";
+                  const likeCount = typeof c.like_count === "number" ? c.like_count : 0;
+                  const isCommentLiked = c.liked === true;
+                  const replyCount =
+                    typeof c.total_number === "number"
+                      ? c.total_number
+                      : typeof c.reply_count === "number"
+                        ? c.reply_count
+                        : 0;
+
+                  const commentPost: PostV1 = {
+                    key: { id: "comment_" + statusId + "_" + commentId, host },
+                    createdAt: parseWeiboDate(typeof c.created_at === "string" ? c.created_at : undefined),
+                    content: { format: "plain", value: text || "（评论内容为空）" },
+                    url: context.origin + "/detail/" + encodeURIComponent(statusId || commentId),
+                    ...(commentUser ? { author: commentUser } : {}),
+                    actions: [
+                      { action: "Reply" as const, label: "回复", enabled: true, count: replyCount },
+                      {
+                        action: isCommentLiked ? ("Unfavourite" as const) : ("Favourite" as const),
+                        label: isCommentLiked ? "已赞" : "赞",
+                        enabled: true,
+                        active: isCommentLiked,
+                        count: likeCount,
+                        actionToken: "comment_" + statusId + "_" + commentId,
+                      },
+                      ...(isAuthor
+                        ? [
+                            {
+                              action: "Delete" as const,
+                              label: "删除",
+                              enabled: true,
+                              actionToken: "comment_" + statusId + "_" + commentId,
+                            },
+                          ]
+                        : []),
+                    ],
+                  };
+
+                  let quote: PostV1 | undefined = undefined;
+                  if (statusObj) {
+                    quote = mapTimelinePost(statusObj, context, currentUserId);
+                    if (quote) {
+                      commentPost.references = [{ type: "Quote", key: quote.key }];
+                    }
+                  }
+
+                  items.push({
+                    type: "post",
+                    post: commentPost,
+                    ...(quote ? { presentation: { quotes: [quote] } } : {}),
+                  });
+                }
+              }
+            }
+          } catch {
+            // non-fatal
+          }
+        } else if (filterId === "like") {
+          try {
+            const url = context.origin + "/message/attitude?page=" + pageNum;
+            const res = await requestJson(
+              url,
+              context,
+              credential.cookies,
+              { Referer: context.origin + "/message/attitude" },
+              false,
+              true,
+            );
+            if (res && isOkResponse(res.ok)) {
+              const list = Array.isArray(res.data)
+                ? (res.data as Record<string, unknown>[])
+                : isRecord(res.data) && Array.isArray((res.data as Record<string, unknown>).attitudes)
+                  ? ((res.data as Record<string, unknown>).attitudes as Record<string, unknown>[])
+                  : [];
+              if (list.length > 0) {
+                hasMore = true;
+                for (const a of list) {
+                  if (!isRecord(a)) continue;
+                  const attitudeId = String(a.idStr || a.id || "");
+                  if (!attitudeId) continue;
+                  const actor = isRecord(a.user)
+                    ? mapTimelineProfile(a.user as Record<string, unknown>, context)
+                    : undefined;
+                  if (!actor) continue;
+
+                  let targetPost: PostV1 | undefined = undefined;
+                  if (isRecord(a.status)) {
+                    targetPost = mapTimelinePost(a.status as Record<string, unknown>, context, currentUserId);
+                  }
+
+                  const createdAt = parseWeiboDate(typeof a.created_at === "string" ? a.created_at : undefined);
+
+                  items.push({
+                    type: "userList",
+                    userList: {
+                      key: { id: "attitude_" + attitudeId, host },
+                      createdAt,
+                      users: [actor],
+                      message: {
+                        key: { id: "attitude_msg_" + attitudeId, host },
+                        createdAt,
+                        icon: "Heart",
+                        actor,
+                        kind: "Favourite",
+                      },
+                      ...(targetPost ? { post: targetPost } : {}),
+                    },
+                  });
+                }
+              }
+            }
+          } catch {
+            // non-fatal
+          }
+        }
+
+        const nextCursor = hasMore ? String(pageNum + 1) : undefined;
+        return {
+          items,
+          endReached: !hasMore,
+          ...(nextCursor ? { olderCursor: nextCursor } : {}),
+        };
+      },
+
+      async badge(request, context) {
+        try {
+          const credential = await readCredential();
+          const st = await getCsrfToken(context, credential.cookies).catch(() => undefined);
+          const unreadUrl = context.origin + "/api/remind/unread?t=" + Date.now();
+          const headers: Record<string, string> = {
+            Referer: context.origin + "/",
+          };
+          if (st) {
+            headers["X-Xsrf-Token"] = st;
+          }
+          const response = await requestJson(unreadUrl, context, credential.cookies, headers, true, true);
+          if (response && isOkResponse(response.ok) && isRecord(response.data)) {
+            const d = response.data as Record<string, unknown>;
+            const mentionStatus = typeof d.mention_status === "number" ? d.mention_status : 0;
+            const cmt = typeof d.cmt === "number" ? d.cmt : 0;
+            const attitude = typeof d.attitude === "number" ? d.attitude : 0;
+            return { value: mentionStatus + cmt + attitude };
+          }
+        } catch {
+          // non-fatal
+        }
+        return { value: 0 };
       },
     },
   },
@@ -1224,7 +1398,6 @@ function mapTimelineStatus(
       ? {
           presentation: {
             quotes: [retweetedStatus],
-            repost: retweetedStatus,
           },
         }
       : {}),

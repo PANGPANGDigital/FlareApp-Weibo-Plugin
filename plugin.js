@@ -159,6 +159,7 @@
                 "flare.datasource.timeline/v1": ["page"],
                 "flare.datasource.tab-catalog/v1": ["page"],
                 "flare.datasource.post/v1": ["detail", "context", "mutate", "delete"],
+                "flare.datasource.notification/v1": ["page", "badge"],
                 "flare.datasource.compose/v1": ["publish"],
                 "flare.datasource.profile/v1": ["byId", "byHandle"]
               }
@@ -333,8 +334,7 @@
             post,
             ...retweet ? {
               presentation: {
-                quotes: [retweet],
-                repost: retweet
+                quotes: [retweet]
               }
             } : {}
           };
@@ -358,8 +358,7 @@
                     post: rootPost,
                     ...retweet ? {
                       presentation: {
-                        quotes: [retweet],
-                        repost: retweet
+                        quotes: [retweet]
                       }
                     } : {}
                   });
@@ -480,21 +479,31 @@
           }
           if (isComment) {
             if (request.action === "Favourite") {
-              await requestFormPost(
+              const res = await requestFormPost(
                 context.origin + "/api/likes/update",
                 { id: commentId, type: "comment", st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
               );
+              if (!res || !isOkResponse(res.ok)) {
+                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u70B9\u8D5E\u8BC4\u8BBA\u5931\u8D25\u3002";
+                fail("Remote", msg);
+              }
+              return { type: "noChange" };
             } else if (request.action === "Unfavourite") {
-              await requestFormPost(
+              const res = await requestFormPost(
                 context.origin + "/api/likes/destroy",
                 { id: commentId, type: "comment", st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
               );
+              if (!res || !isOkResponse(res.ok)) {
+                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u53D6\u6D88\u70B9\u8D5E\u8BC4\u8BBA\u5931\u8D25\u3002";
+                fail("Remote", msg);
+              }
+              return { type: "noChange" };
             } else if (request.action === "Delete") {
               await requestFormPost(
                 context.origin + "/comments/destroy",
@@ -505,54 +514,48 @@
               );
               return { type: "deleted" };
             }
-            const isNowLiked = request.action === "Favourite";
-            const updatedPost = {
-              key: request.key,
-              createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-              content: { format: "plain", value: "" },
-              replyTo: { id: statusId, host: accountHost(context) },
-              actions: [
-                {
-                  action: "Reply",
-                  label: "\u56DE\u590D",
-                  enabled: true
-                },
-                {
-                  action: isNowLiked ? "Unfavourite" : "Favourite",
-                  label: isNowLiked ? "\u5DF2\u8D5E" : "\u8D5E",
-                  enabled: true,
-                  active: isNowLiked,
-                  actionToken: "comment_" + commentId
-                }
-              ]
-            };
-            return { type: "updatedPost", post: updatedPost };
+            return { type: "noChange" };
           } else {
             if (request.action === "Favourite") {
-              await requestFormPost(
+              const res = await requestFormPost(
                 context.origin + "/api/attitudes/create",
                 { id: statusId, attitude: "heart", st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
               );
+              if (!res || !isOkResponse(res.ok)) {
+                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u70B9\u8D5E\u5931\u8D25\u3002";
+                fail("Remote", msg);
+              }
+              return { type: "noChange" };
             } else if (request.action === "Unfavourite") {
-              await requestFormPost(
+              const res = await requestFormPost(
                 context.origin + "/api/attitudes/destroy",
                 { id: statusId, attitude: "heart", st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
               );
+              if (!res || !isOkResponse(res.ok)) {
+                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u53D6\u6D88\u70B9\u8D5E\u5931\u8D25\u3002";
+                fail("Remote", msg);
+              }
+              return { type: "noChange" };
             } else if (request.action === "Repost") {
               const content = request.parameters?.content || "\u8F6C\u53D1\u5FAE\u535A";
-              await requestFormPost(
+              const res = await requestFormPost(
                 context.origin + "/api/statuses/repost",
                 { id: statusId, mid: statusId, content, st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
               );
+              if (!res || !isOkResponse(res.ok)) {
+                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u8F6C\u53D1\u5931\u8D25\u3002";
+                fail("Remote", msg);
+              }
+              return { type: "noChange" };
             } else if (request.action === "Bookmark") {
               await requestFormPost(
                 context.origin + "/api/statuses/createfav",
@@ -561,6 +564,7 @@
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
               );
+              return { type: "noChange" };
             } else if (request.action === "Unbookmark") {
               await requestFormPost(
                 context.origin + "/api/statuses/destroyfav",
@@ -569,6 +573,7 @@
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
               );
+              return { type: "noChange" };
             } else if (request.action === "Delete") {
               await requestFormPost(
                 context.origin + "/profile/delMyblog",
@@ -579,58 +584,7 @@
               );
               return { type: "deleted" };
             }
-            try {
-              const updatedData = await fetchSingleStatus(statusId, context, credential.cookies, st);
-              if (updatedData) {
-                const updated = mapTimelinePost(updatedData, context, credential.profile.key.id);
-                if (updated) {
-                  if (request.action === "Favourite") {
-                    updated.favouritesCount = (updated.favouritesCount || 0) + 1;
-                    updated.actions = (updated.actions || []).map(
-                      (a) => a.action === "Favourite" ? { ...a, action: "Unfavourite", label: "\u5DF2\u8D5E", active: true, count: updated.favouritesCount } : a
-                    );
-                  } else if (request.action === "Unfavourite") {
-                    updated.favouritesCount = Math.max(0, (updated.favouritesCount || 1) - 1);
-                    updated.actions = (updated.actions || []).map(
-                      (a) => a.action === "Unfavourite" ? { ...a, action: "Favourite", label: "\u8D5E", active: false, count: updated.favouritesCount } : a
-                    );
-                  } else if (request.action === "Repost") {
-                    updated.repostsCount = (updated.repostsCount || 0) + 1;
-                    updated.actions = (updated.actions || []).map(
-                      (a) => a.action === "Repost" ? { ...a, count: updated.repostsCount } : a
-                    );
-                  } else if (request.action === "Bookmark") {
-                    updated.actions = (updated.actions || []).map(
-                      (a) => a.action === "Bookmark" ? { ...a, action: "Unbookmark", label: "\u5DF2\u6536\u85CF", active: true } : a
-                    );
-                  } else if (request.action === "Unbookmark") {
-                    updated.actions = (updated.actions || []).map(
-                      (a) => a.action === "Unbookmark" ? { ...a, action: "Bookmark", label: "\u6536\u85CF", active: false } : a
-                    );
-                  }
-                  return { type: "updatedPost", post: updated };
-                }
-              }
-            } catch {
-            }
-            const isLiked = request.action === "Favourite";
-            const fallbackActions = [
-              { action: "Repost", label: "\u8F6C\u53D1", enabled: true },
-              { action: "Reply", label: "\u8BC4\u8BBA", enabled: true },
-              {
-                action: isLiked ? "Unfavourite" : "Favourite",
-                label: isLiked ? "\u5DF2\u8D5E" : "\u8D5E",
-                enabled: true,
-                active: isLiked
-              }
-            ];
-            const fallbackPost = {
-              key: request.key,
-              createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-              content: { format: "plain", value: "" },
-              actions: fallbackActions
-            };
-            return { type: "updatedPost", post: fallbackPost };
+            return { type: "noChange" };
           }
         },
         async delete(request, context) {
@@ -776,6 +730,196 @@
         async byHandle(request, context) {
           const credential = await readCredential();
           return await fetchProfileData(request.handle, context, credential.cookies);
+        }
+      },
+      notification: {
+        async page(request, context) {
+          const credential = await readCredential();
+          const currentUserId = credential.profile.key.id;
+          const host = accountHost(context);
+          const filterId = request.filterId || "mention";
+          const cursor = request.page.cursor;
+          const pageNum = cursor ? parseInt(cursor, 10) || 1 : 1;
+          const items = [];
+          let hasMore = false;
+          if (filterId === "mention") {
+            try {
+              const url = context.origin + "/message/mentionsAt?page=" + pageNum;
+              const res = await requestJson(
+                url,
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/message/at" },
+                false,
+                true
+              );
+              if (res && isOkResponse(res.ok)) {
+                const list = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.statuses) ? res.data.statuses : [];
+                if (list.length > 0) {
+                  hasMore = true;
+                  for (const item of list) {
+                    if (!isRecord(item)) continue;
+                    const post = mapTimelinePost(item, context, currentUserId);
+                    if (!post) continue;
+                    const retweet = isRecord(item.retweeted_status) ? mapTimelinePost(item.retweeted_status, context, currentUserId) : void 0;
+                    items.push({
+                      type: "post",
+                      post,
+                      ...retweet ? { presentation: { quotes: [retweet] } } : {}
+                    });
+                  }
+                }
+              }
+            } catch {
+            }
+          } else if (filterId === "comment") {
+            try {
+              const url = context.origin + "/message/cmt?page=" + pageNum;
+              const res = await requestJson(
+                url,
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/message/cmt" },
+                false,
+                true
+              );
+              if (res && isOkResponse(res.ok)) {
+                const list = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.comments) ? res.data.comments : [];
+                if (list.length > 0) {
+                  hasMore = true;
+                  for (const c of list) {
+                    if (!isRecord(c)) continue;
+                    const commentId = String(c.idstr || c.id || "");
+                    if (!commentId) continue;
+                    const commentUser = isRecord(c.user) ? mapTimelineProfile(c.user, context) : void 0;
+                    const commentUserId = commentUser ? commentUser.key.id : void 0;
+                    const isAuthor = Boolean(currentUserId && commentUserId && currentUserId === commentUserId);
+                    const statusObj = isRecord(c.status) ? c.status : void 0;
+                    const statusId = statusObj ? String(statusObj.idstr || statusObj.id || "") : "";
+                    const text = typeof c.text === "string" ? htmlToPlainText(c.text) : "";
+                    const likeCount = typeof c.like_count === "number" ? c.like_count : 0;
+                    const isCommentLiked = c.liked === true;
+                    const replyCount = typeof c.total_number === "number" ? c.total_number : typeof c.reply_count === "number" ? c.reply_count : 0;
+                    const commentPost = {
+                      key: { id: "comment_" + statusId + "_" + commentId, host },
+                      createdAt: parseWeiboDate(typeof c.created_at === "string" ? c.created_at : void 0),
+                      content: { format: "plain", value: text || "\uFF08\u8BC4\u8BBA\u5185\u5BB9\u4E3A\u7A7A\uFF09" },
+                      url: context.origin + "/detail/" + encodeURIComponent(statusId || commentId),
+                      ...commentUser ? { author: commentUser } : {},
+                      actions: [
+                        { action: "Reply", label: "\u56DE\u590D", enabled: true, count: replyCount },
+                        {
+                          action: isCommentLiked ? "Unfavourite" : "Favourite",
+                          label: isCommentLiked ? "\u5DF2\u8D5E" : "\u8D5E",
+                          enabled: true,
+                          active: isCommentLiked,
+                          count: likeCount,
+                          actionToken: "comment_" + statusId + "_" + commentId
+                        },
+                        ...isAuthor ? [
+                          {
+                            action: "Delete",
+                            label: "\u5220\u9664",
+                            enabled: true,
+                            actionToken: "comment_" + statusId + "_" + commentId
+                          }
+                        ] : []
+                      ]
+                    };
+                    let quote = void 0;
+                    if (statusObj) {
+                      quote = mapTimelinePost(statusObj, context, currentUserId);
+                      if (quote) {
+                        commentPost.references = [{ type: "Quote", key: quote.key }];
+                      }
+                    }
+                    items.push({
+                      type: "post",
+                      post: commentPost,
+                      ...quote ? { presentation: { quotes: [quote] } } : {}
+                    });
+                  }
+                }
+              }
+            } catch {
+            }
+          } else if (filterId === "like") {
+            try {
+              const url = context.origin + "/message/attitude?page=" + pageNum;
+              const res = await requestJson(
+                url,
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/message/attitude" },
+                false,
+                true
+              );
+              if (res && isOkResponse(res.ok)) {
+                const list = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.attitudes) ? res.data.attitudes : [];
+                if (list.length > 0) {
+                  hasMore = true;
+                  for (const a of list) {
+                    if (!isRecord(a)) continue;
+                    const attitudeId = String(a.idStr || a.id || "");
+                    if (!attitudeId) continue;
+                    const actor = isRecord(a.user) ? mapTimelineProfile(a.user, context) : void 0;
+                    if (!actor) continue;
+                    let targetPost = void 0;
+                    if (isRecord(a.status)) {
+                      targetPost = mapTimelinePost(a.status, context, currentUserId);
+                    }
+                    const createdAt = parseWeiboDate(typeof a.created_at === "string" ? a.created_at : void 0);
+                    items.push({
+                      type: "userList",
+                      userList: {
+                        key: { id: "attitude_" + attitudeId, host },
+                        createdAt,
+                        users: [actor],
+                        message: {
+                          key: { id: "attitude_msg_" + attitudeId, host },
+                          createdAt,
+                          icon: "Heart",
+                          actor,
+                          kind: "Favourite"
+                        },
+                        ...targetPost ? { post: targetPost } : {}
+                      }
+                    });
+                  }
+                }
+              }
+            } catch {
+            }
+          }
+          const nextCursor = hasMore ? String(pageNum + 1) : void 0;
+          return {
+            items,
+            endReached: !hasMore,
+            ...nextCursor ? { olderCursor: nextCursor } : {}
+          };
+        },
+        async badge(request, context) {
+          try {
+            const credential = await readCredential();
+            const st = await getCsrfToken(context, credential.cookies).catch(() => void 0);
+            const unreadUrl = context.origin + "/api/remind/unread?t=" + Date.now();
+            const headers = {
+              Referer: context.origin + "/"
+            };
+            if (st) {
+              headers["X-Xsrf-Token"] = st;
+            }
+            const response = await requestJson(unreadUrl, context, credential.cookies, headers, true, true);
+            if (response && isOkResponse(response.ok) && isRecord(response.data)) {
+              const d = response.data;
+              const mentionStatus = typeof d.mention_status === "number" ? d.mention_status : 0;
+              const cmt = typeof d.cmt === "number" ? d.cmt : 0;
+              const attitude = typeof d.attitude === "number" ? d.attitude : 0;
+              return { value: mentionStatus + cmt + attitude };
+            }
+          } catch {
+          }
+          return { value: 0 };
         }
       }
     }
@@ -994,8 +1138,7 @@
       post,
       ...retweetedStatus ? {
         presentation: {
-          quotes: [retweetedStatus],
-          repost: retweetedStatus
+          quotes: [retweetedStatus]
         }
       } : {}
     };
