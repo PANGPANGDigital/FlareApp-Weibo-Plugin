@@ -158,7 +158,7 @@
               capabilities: {
                 "flare.datasource.timeline/v1": ["page"],
                 "flare.datasource.tab-catalog/v1": ["page"],
-                "flare.datasource.post/v1": ["detail", "context", "mutate"],
+                "flare.datasource.post/v1": ["detail", "context", "mutate", "delete"],
                 "flare.datasource.compose/v1": ["publish"],
                 "flare.datasource.profile/v1": ["byId", "byHandle"]
               }
@@ -319,133 +319,322 @@
         async detail(request, context) {
           const credential = await readCredential();
           const id = request.key.id;
-          const url = context.origin + "/statuses/show?id=" + encodeURIComponent(id);
-          const response = await requestJson(url, context, credential.cookies, {}, false, true);
-          if (!response || !isRecord(response.data)) {
+          const st = await getCsrfToken(context, credential.cookies).catch(() => void 0);
+          const data = await fetchSingleStatus(id, context, credential.cookies, st);
+          if (!data) {
             fail("NotFound", "\u5FAE\u535A\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u5220\u9664\u3002");
           }
-          const data = response.data;
-          const post = mapTimelinePost(data, context);
+          const post = mapTimelinePost(data, context, credential.profile.key.id);
           if (!post) {
             fail("NotFound", "\u65E0\u6CD5\u89E3\u6790\u8BE5\u5FAE\u535A\u3002");
           }
-          const retweet = isRecord(data.retweeted_status) ? mapTimelinePost(data.retweeted_status, context) : void 0;
+          const retweet = isRecord(data.retweeted_status) ? mapTimelinePost(data.retweeted_status, context, credential.profile.key.id) : void 0;
           return {
             post,
-            ...retweet ? { presentation: { repost: retweet } } : {}
+            ...retweet ? {
+              presentation: {
+                quotes: [retweet],
+                repost: retweet
+              }
+            } : {}
           };
         },
         async context(request, context) {
           const credential = await readCredential();
           const id = request.key.id;
           const cursor = request.page.cursor;
-          let url = context.origin + "/comments/hotflow?id=" + encodeURIComponent(id) + "&mid=" + encodeURIComponent(id) + "&max_id_type=0";
-          if (cursor) {
-            url += "&max_id=" + encodeURIComponent(cursor);
-          }
-          let response = null;
+          let rootComments = [];
+          let nextCursor = void 0;
           try {
-            response = await requestJson(url, context, credential.cookies, {}, false, true);
-          } catch (error) {
-            if (isAuthenticationError(error)) throw error;
-            return { items: [], endReached: true };
-          }
-          if (!response || !isOkResponse(response.ok) || !isRecord(response.data)) {
-            return { items: [], endReached: true };
-          }
-          const data = response.data;
-          const rootComments = Array.isArray(data.data) ? data.data : Array.isArray(data.root_comments) ? data.root_comments : [];
-          const items = [];
-          for (const c of rootComments) {
-            if (!isRecord(c)) continue;
-            const commentId = String(c.idstr || c.id || "");
-            if (!commentId) continue;
-            const commentUser = isRecord(c.user) ? c.user : {};
-            const author = {
-              key: { id: String(commentUser.id || commentId), host: accountHost(context) },
-              displayName: String(commentUser.screen_name || "\u5FAE\u535A\u7528\u6237"),
-              handle: String(commentUser.screen_name || commentUser.id || "weibo"),
-              avatarUrl: safeWeiboMediaUrl(commentUser.profile_image_url || commentUser.avatar_hd)
-            };
-            const text = typeof c.text === "string" ? htmlToPlainText(c.text) : "";
-            const likeCount = typeof c.like_count === "number" ? c.like_count : void 0;
-            const isCommentLiked = c.liked === true;
-            const commentActions = [
-              {
-                action: "Reply",
-                label: "\u56DE\u590D",
-                enabled: true
-              },
-              {
-                action: isCommentLiked ? "Unfavourite" : "Favourite",
-                label: isCommentLiked ? "\u5DF2\u8D5E" : "\u8D5E",
-                enabled: true,
-                active: isCommentLiked,
-                count: likeCount
+            let url = context.origin + "/comments/hotflow?id=" + encodeURIComponent(id) + "&mid=" + encodeURIComponent(id) + "&max_id_type=0";
+            if (cursor && !cursor.startsWith("page_")) {
+              url += "&max_id=" + encodeURIComponent(cursor);
+            }
+            const response = await requestJson(
+              url,
+              context,
+              credential.cookies,
+              { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
+              false,
+              true
+            );
+            if (response && isOkResponse(response.ok) && isRecord(response.data)) {
+              const data = response.data;
+              if (Array.isArray(data.data)) {
+                rootComments = data.data;
+              } else if (Array.isArray(data.root_comments)) {
+                rootComments = data.root_comments;
               }
-            ];
-            items.push({
-              type: "post",
-              post: {
-                key: { id: "comment-" + commentId, host: accountHost(context) },
-                createdAt: parseWeiboDate(typeof c.created_at === "string" ? c.created_at : void 0),
-                content: { format: "plain", value: text || " " },
-                author,
-                replyTo: request.key,
-                actions: commentActions,
-                ...likeCount !== void 0 ? { favouritesCount: likeCount } : {}
+              const rawMaxId = data.max_id;
+              if ((typeof rawMaxId === "number" || typeof rawMaxId === "string") && String(rawMaxId) !== "0" && String(rawMaxId) !== cursor) {
+                nextCursor = String(rawMaxId);
               }
-            });
+            }
+          } catch {
           }
-          const rawMaxId = data.max_id;
-          const olderCursor = (typeof rawMaxId === "number" || typeof rawMaxId === "string") && String(rawMaxId) !== "0" && String(rawMaxId) !== cursor ? String(rawMaxId) : void 0;
-          return {
-            items,
-            endReached: !olderCursor,
-            ...olderCursor ? { olderCursor } : {}
-          };
-        },
-        async mutate(request, context) {
-          const credential = await readCredential();
-          const st = await getCsrfToken(context, credential.cookies);
-          const id = request.key.id.replace(/^comment-/, "");
-          if (request.action === "Favourite") {
-            await requestFormPost(
-              context.origin + "/api/attitudes/create",
-              { id, attitude: "heart", st },
-              context,
-              credential.cookies
-            );
-          } else if (request.action === "Unfavourite") {
-            await requestFormPost(
-              context.origin + "/api/attitudes/destroy",
-              { id, attitude: "heart", st },
-              context,
-              credential.cookies
-            );
-          } else if (request.action === "Repost") {
-            const content = request.parameters?.content || "\u8F6C\u53D1\u5FAE\u535A";
-            await requestFormPost(
-              context.origin + "/api/statuses/repost",
-              { mid: id, content, st },
-              context,
-              credential.cookies
-            );
-          }
-          if (!request.key.id.startsWith("comment-")) {
+          if (!rootComments.length && !cursor) {
             try {
-              const url = context.origin + "/statuses/show?id=" + encodeURIComponent(id);
-              const response = await requestJson(url, context, credential.cookies, {}, false, true);
-              if (response && isRecord(response.data)) {
-                const updated = mapTimelinePost(response.data, context);
-                if (updated) {
-                  return { type: "updatedPost", post: updated };
+              const showUrl = context.origin + "/api/comments/show?id=" + encodeURIComponent(id) + "&page=1";
+              const response = await requestJson(
+                showUrl,
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
+                false,
+                true
+              );
+              if (response && isOkResponse(response.ok) && isRecord(response.data)) {
+                const data = response.data;
+                if (Array.isArray(data.data)) {
+                  rootComments = data.data;
+                }
+                const rawMax = data.max;
+                if (typeof rawMax === "number" && rawMax > 1) {
+                  nextCursor = "page_2";
+                }
+              }
+            } catch {
+            }
+          } else if (!rootComments.length && cursor && cursor.startsWith("page_")) {
+            const pageNum = parseInt(cursor.replace("page_", ""), 10) || 1;
+            try {
+              const showUrl = context.origin + "/api/comments/show?id=" + encodeURIComponent(id) + "&page=" + pageNum;
+              const response = await requestJson(
+                showUrl,
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
+                false,
+                true
+              );
+              if (response && isOkResponse(response.ok) && isRecord(response.data)) {
+                const data = response.data;
+                if (Array.isArray(data.data)) {
+                  rootComments = data.data;
+                }
+                const rawMax = data.max;
+                if (typeof rawMax === "number" && pageNum < rawMax) {
+                  nextCursor = "page_" + (pageNum + 1);
                 }
               }
             } catch {
             }
           }
-          return { type: "noChange" };
+          const items = [];
+          const currentUserId = credential.profile.key.id;
+          for (const c of rootComments) {
+            if (!isRecord(c)) continue;
+            const commentPost = mapCommentPost(c, id, currentUserId, context);
+            if (commentPost) {
+              items.push({
+                type: "post",
+                post: commentPost
+              });
+            }
+          }
+          return {
+            items,
+            endReached: !nextCursor,
+            ...nextCursor ? { olderCursor: nextCursor } : {}
+          };
+        },
+        async mutate(request, context) {
+          const credential = await readCredential();
+          const st = await getCsrfToken(context, credential.cookies);
+          const rawId = request.key.id;
+          const isComment = rawId.startsWith("comment_") || rawId.startsWith("comment-");
+          let statusId = rawId;
+          let commentId = "";
+          if (isComment) {
+            const parts = rawId.split("_");
+            if (parts.length >= 3) {
+              statusId = parts[1];
+              commentId = parts[2];
+            } else {
+              commentId = rawId.replace(/^comment[-_]/, "");
+              statusId = commentId;
+            }
+          }
+          if (isComment) {
+            if (request.action === "Favourite") {
+              await requestFormPost(
+                context.origin + "/api/likes/update",
+                { id: commentId, type: "comment", st },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+            } else if (request.action === "Unfavourite") {
+              await requestFormPost(
+                context.origin + "/api/likes/destroy",
+                { id: commentId, type: "comment", st },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+            } else if (request.action === "Delete") {
+              await requestFormPost(
+                context.origin + "/comments/destroy",
+                { cid: commentId, st },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+              return { type: "deleted" };
+            }
+            const isNowLiked = request.action === "Favourite";
+            const updatedPost = {
+              key: request.key,
+              createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+              content: { format: "plain", value: "" },
+              replyTo: { id: statusId, host: accountHost(context) },
+              actions: [
+                {
+                  action: "Reply",
+                  label: "\u56DE\u590D",
+                  enabled: true
+                },
+                {
+                  action: isNowLiked ? "Unfavourite" : "Favourite",
+                  label: isNowLiked ? "\u5DF2\u8D5E" : "\u8D5E",
+                  enabled: true,
+                  active: isNowLiked,
+                  actionToken: "comment_" + commentId
+                }
+              ]
+            };
+            return { type: "updatedPost", post: updatedPost };
+          } else {
+            if (request.action === "Favourite") {
+              await requestFormPost(
+                context.origin + "/api/attitudes/create",
+                { id: statusId, attitude: "heart", st },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+            } else if (request.action === "Unfavourite") {
+              await requestFormPost(
+                context.origin + "/api/attitudes/destroy",
+                { id: statusId, attitude: "heart", st },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+            } else if (request.action === "Repost") {
+              const content = request.parameters?.content || "\u8F6C\u53D1\u5FAE\u535A";
+              await requestFormPost(
+                context.origin + "/api/statuses/repost",
+                { id: statusId, mid: statusId, content, st },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+            } else if (request.action === "Bookmark") {
+              await requestFormPost(
+                context.origin + "/api/statuses/createfav",
+                { id: statusId, st },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+            } else if (request.action === "Unbookmark") {
+              await requestFormPost(
+                context.origin + "/api/statuses/destroyfav",
+                { id: statusId, st },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+            } else if (request.action === "Delete") {
+              await requestFormPost(
+                context.origin + "/profile/delMyblog",
+                { mid: statusId, st },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/" }
+              );
+              return { type: "deleted" };
+            }
+            try {
+              const updatedData = await fetchSingleStatus(statusId, context, credential.cookies, st);
+              if (updatedData) {
+                const updated = mapTimelinePost(updatedData, context, credential.profile.key.id);
+                if (updated) {
+                  if (request.action === "Favourite") {
+                    updated.favouritesCount = (updated.favouritesCount || 0) + 1;
+                    updated.actions = (updated.actions || []).map(
+                      (a) => a.action === "Favourite" ? { ...a, action: "Unfavourite", label: "\u5DF2\u8D5E", active: true, count: updated.favouritesCount } : a
+                    );
+                  } else if (request.action === "Unfavourite") {
+                    updated.favouritesCount = Math.max(0, (updated.favouritesCount || 1) - 1);
+                    updated.actions = (updated.actions || []).map(
+                      (a) => a.action === "Unfavourite" ? { ...a, action: "Favourite", label: "\u8D5E", active: false, count: updated.favouritesCount } : a
+                    );
+                  } else if (request.action === "Repost") {
+                    updated.repostsCount = (updated.repostsCount || 0) + 1;
+                    updated.actions = (updated.actions || []).map(
+                      (a) => a.action === "Repost" ? { ...a, count: updated.repostsCount } : a
+                    );
+                  } else if (request.action === "Bookmark") {
+                    updated.actions = (updated.actions || []).map(
+                      (a) => a.action === "Bookmark" ? { ...a, action: "Unbookmark", label: "\u5DF2\u6536\u85CF", active: true } : a
+                    );
+                  } else if (request.action === "Unbookmark") {
+                    updated.actions = (updated.actions || []).map(
+                      (a) => a.action === "Unbookmark" ? { ...a, action: "Bookmark", label: "\u6536\u85CF", active: false } : a
+                    );
+                  }
+                  return { type: "updatedPost", post: updated };
+                }
+              }
+            } catch {
+            }
+            const isLiked = request.action === "Favourite";
+            const fallbackActions = [
+              { action: "Reply", label: "\u8BC4\u8BBA", enabled: true },
+              { action: "Repost", label: "\u8F6C\u53D1", enabled: true },
+              {
+                action: isLiked ? "Unfavourite" : "Favourite",
+                label: isLiked ? "\u5DF2\u8D5E" : "\u8D5E",
+                enabled: true,
+                active: isLiked
+              }
+            ];
+            const fallbackPost = {
+              key: request.key,
+              createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+              content: { format: "plain", value: "" },
+              actions: fallbackActions
+            };
+            return { type: "updatedPost", post: fallbackPost };
+          }
+        },
+        async delete(request, context) {
+          const credential = await readCredential();
+          const st = await getCsrfToken(context, credential.cookies);
+          const rawId = request.key.id;
+          if (rawId.startsWith("comment_") || rawId.startsWith("comment-")) {
+            const parts = rawId.split("_");
+            const commentId = parts.length >= 3 ? parts[2] : rawId.replace(/^comment[-_]/, "");
+            const statusId = parts.length >= 3 ? parts[1] : commentId;
+            await requestFormPost(
+              context.origin + "/comments/destroy",
+              { cid: commentId, st },
+              context,
+              credential.cookies,
+              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+            );
+          } else {
+            await requestFormPost(
+              context.origin + "/profile/delMyblog",
+              { mid: rawId, st },
+              context,
+              credential.cookies,
+              { Referer: context.origin + "/" }
+            );
+          }
+          return { type: "deleted" };
         }
       },
       compose: {
@@ -454,60 +643,101 @@
           const st = await getCsrfToken(context, credential.cookies);
           if (request.replyTo) {
             const rawId = request.replyTo.id;
-            const isCommentReply = rawId.startsWith("comment-");
-            const targetId = rawId.replace(/^comment-/, "");
-            const formValues = {
-              mid: targetId,
-              content: request.text,
-              st
-            };
-            if (isCommentReply) {
-              formValues.cid = targetId;
+            if (rawId.startsWith("comment_") || rawId.startsWith("comment-")) {
+              const parts = rawId.split("_");
+              let statusId = "";
+              let commentId = "";
+              if (parts.length >= 3) {
+                statusId = parts[1];
+                commentId = parts[2];
+              } else {
+                commentId = rawId.replace(/^comment[-_]/, "");
+                statusId = commentId;
+              }
+              const res = await requestFormPost(
+                context.origin + "/api/comments/reply",
+                {
+                  id: statusId,
+                  mid: statusId,
+                  cid: commentId,
+                  reply: commentId,
+                  content: request.text,
+                  st
+                },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+              if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
+                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u56DE\u590D\u53D1\u5E03\u5931\u8D25\u3002";
+                fail("Remote", msg);
+              }
+              const commentData = res.data;
+              const mapped = mapCommentPost(commentData, statusId, credential.profile.key.id, context);
+              if (mapped) {
+                return { post: mapped };
+              }
+              const post = {
+                key: { id: "comment_" + statusId + "_" + (commentData.idstr || commentData.id || String(Date.now())), host: accountHost(context) },
+                createdAt: parseWeiboDate(typeof commentData.created_at === "string" ? commentData.created_at : void 0),
+                content: { format: "plain", value: request.text },
+                author: credential.profile,
+                replyTo: request.replyTo
+              };
+              return { post };
+            } else {
+              const statusId = rawId;
+              const res = await requestFormPost(
+                context.origin + "/api/comments/create",
+                {
+                  id: statusId,
+                  mid: statusId,
+                  content: request.text,
+                  st
+                },
+                context,
+                credential.cookies,
+                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+              );
+              if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
+                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u8BC4\u8BBA\u53D1\u5E03\u5931\u8D25\u3002";
+                fail("Remote", msg);
+              }
+              const commentData = res.data;
+              const mapped = mapCommentPost(commentData, statusId, credential.profile.key.id, context);
+              if (mapped) {
+                return { post: mapped };
+              }
+              const post = {
+                key: { id: "comment_" + statusId + "_" + (commentData.idstr || commentData.id || String(Date.now())), host: accountHost(context) },
+                createdAt: parseWeiboDate(typeof commentData.created_at === "string" ? commentData.created_at : void 0),
+                content: { format: "plain", value: request.text },
+                author: credential.profile,
+                replyTo: request.replyTo
+              };
+              return { post };
             }
-            const res = await requestFormPost(
-              context.origin + "/api/comments/create",
-              formValues,
-              context,
-              credential.cookies
-            );
-            if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
-              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u8BC4\u8BBA\u53D1\u5E03\u5931\u8D25\u3002";
-              fail("Remote", msg);
-            }
-            const commentData = res.data;
-            const commentId = String(commentData.idstr || commentData.id || await flare.crypto.uuid());
-            const userObj = isRecord(commentData.user) ? commentData.user : {};
-            const author = {
-              key: { id: String(userObj.id || credential.profile.key.id), host: accountHost(context) },
-              displayName: String(userObj.screen_name || credential.profile.displayName || "\u6211"),
-              handle: String(userObj.screen_name || credential.profile.handle || "me"),
-              avatarUrl: safeWeiboMediaUrl(userObj.profile_image_url || userObj.avatar_hd || credential.profile.avatarUrl)
-            };
-            const post = {
-              key: { id: "comment-" + commentId, host: accountHost(context) },
-              createdAt: parseWeiboDate(typeof commentData.created_at === "string" ? commentData.created_at : void 0),
-              content: { format: "plain", value: request.text },
-              author,
-              replyTo: request.replyTo
-            };
-            return { post };
           } else {
             const formValues = {
               content: request.text,
               st
             };
+            if (request.visibility === "followers") {
+              formValues.visible = "6";
+            }
             const res = await requestFormPost(
-              context.origin + "/api/statuses/create",
+              context.origin + "/api/statuses/update",
               formValues,
               context,
-              credential.cookies
+              credential.cookies,
+              { Referer: context.origin + "/" }
             );
             if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
               const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u5FAE\u535A\u53D1\u5E03\u5931\u8D25\u3002";
               fail("Remote", msg);
             }
             const statusData = res.data;
-            const post = mapTimelinePost(statusData, context);
+            const post = mapTimelinePost(statusData, context, credential.profile.key.id);
             if (!post) {
               fail("Remote", "\u65E0\u6CD5\u89E3\u6790\u65B0\u53D1\u5E03\u7684\u5FAE\u535A\u3002");
             }
@@ -731,23 +961,30 @@
       ...olderCursor && olderCursor !== cursor && items.length > 0 ? { olderCursor } : {}
     };
   }
-  function mapTimelineStatus(value, context) {
+  function mapTimelineStatus(value, context, currentUserId) {
     if (!isRecord(value)) return void 0;
-    const post = mapTimelinePost(value, context);
+    const post = mapTimelinePost(value, context, currentUserId);
     if (!post) return void 0;
-    const retweetedStatus = isRecord(value.retweeted_status) ? mapTimelinePost(value.retweeted_status, context) : void 0;
+    const retweetedStatus = isRecord(value.retweeted_status) ? mapTimelinePost(value.retweeted_status, context, currentUserId) : void 0;
     return {
       type: "post",
       post,
-      ...retweetedStatus ? { presentation: { repost: retweetedStatus } } : {}
+      ...retweetedStatus ? {
+        presentation: {
+          quotes: [retweetedStatus],
+          repost: retweetedStatus
+        }
+      } : {}
     };
   }
-  function mapTimelinePost(value, context) {
+  function mapTimelinePost(value, context, currentUserId) {
     const id = optionalScalarText(value.idstr ?? value.id ?? value.mid);
     if (!id) return void 0;
     const host = accountHost(context);
     const statusText = optionalScalarText(value.raw_text) || htmlToPlainText(optionalScalarText(value.text) || "");
     const user = isRecord(value.user) ? mapTimelineProfile(value.user, context) : void 0;
+    const userId = user ? user.key.id : void 0;
+    const isFromMe = Boolean(currentUserId && userId && currentUserId === userId);
     const post = {
       key: { id, host },
       createdAt: parseWeiboDate(optionalScalarText(value.created_at)),
@@ -764,18 +1001,23 @@
     if (repostsCount !== void 0) post.repostsCount = repostsCount;
     if (favouritesCount !== void 0) post.favouritesCount = favouritesCount;
     const isLiked = value.favorited === true || typeof value.attitudes_status === "number" && value.attitudes_status > 0 || value.attitude_type === "heart" || value.liked === true;
+    const isFavorited = value.favorited === true;
+    const visible = isRecord(value.visible) ? value.visible : void 0;
+    const canReblog = !visible || visible.type === void 0 || visible.type === 0 || visible.type === "0";
     const actions = [
+      ...canReblog ? [
+        {
+          action: "Repost",
+          label: "\u8F6C\u53D1",
+          enabled: true,
+          count: repostsCount
+        }
+      ] : [],
       {
         action: "Reply",
-        label: "\u56DE\u590D",
+        label: "\u8BC4\u8BBA",
         enabled: true,
         count: repliesCount
-      },
-      {
-        action: "Repost",
-        label: "\u8F6C\u53D1",
-        enabled: true,
-        count: repostsCount
       },
       {
         action: isLiked ? "Unfavourite" : "Favourite",
@@ -783,9 +1025,34 @@
         enabled: true,
         active: isLiked,
         count: favouritesCount
-      }
+      },
+      {
+        action: isFavorited ? "Unbookmark" : "Bookmark",
+        label: isFavorited ? "\u5DF2\u6536\u85CF" : "\u6536\u85CF",
+        enabled: true,
+        active: isFavorited
+      },
+      ...isFromMe ? [
+        {
+          action: "Delete",
+          label: "\u5220\u9664",
+          enabled: true
+        }
+      ] : []
     ];
     post.actions = actions;
+    const subtitle = (optionalScalarText(value.region_name) || optionalScalarText(value.source) || "").replace(/<[^>]+>/g, "").trim();
+    if (subtitle) {
+      post.sourceChannel = { id: "source", name: subtitle };
+    }
+    if (isRecord(value.retweeted_status)) {
+      const retweetId = optionalScalarText(
+        value.retweeted_status.idstr ?? value.retweeted_status.id ?? value.retweeted_status.mid
+      );
+      if (retweetId) {
+        post.references = [{ type: "Quote", key: { id: retweetId, host } }];
+      }
+    }
     return post;
   }
   function mapTimelineProfile(user, context) {
@@ -808,13 +1075,31 @@
       if (!isRecord(rawPic)) continue;
       const large = isRecord(rawPic.large) ? rawPic.large : {};
       const rawUrl = optionalScalarText(large.url) || optionalScalarText(rawPic.url);
-      const url = safeWeiboMediaUrl(rawUrl);
+      const url = safeWeiboMediaUrl(rawUrl ? rawUrl.replace("mw2000", "large") : void 0);
       if (!url) continue;
-      const previewUrl = safeWeiboMediaUrl(optionalScalarText(rawPic.url)) || url;
       const geo = isRecord(large.geo) ? large.geo : isRecord(rawPic.geo) ? rawPic.geo : {};
       const width = optionalPositiveNumber(geo.width);
       const height = optionalPositiveNumber(geo.height);
       const picId = optionalScalarText(rawPic.pid) || `${statusId}-image-${index}`;
+      const rawPreview = optionalScalarText(rawPic.url) || rawUrl;
+      const previewUrl = safeWeiboMediaUrl(rawPreview ? rawPreview.replace("orj360", "mw600") : void 0) || url;
+      const picType = String(rawPic.type || "");
+      const videoSrc = optionalScalarText(rawPic.videoSrc);
+      if ((picType === "video" || picType === "livephoto") && videoSrc) {
+        const safeVideoSrc = safeWeiboMediaUrl(videoSrc);
+        if (safeVideoSrc) {
+          media.push({
+            id: picId,
+            type: "video",
+            url: safeVideoSrc,
+            previewUrl,
+            ...width !== void 0 ? { width } : {},
+            ...height !== void 0 ? { height } : {}
+          });
+          if (media.length >= MAX_TIMELINE_MEDIA) break;
+          continue;
+        }
+      }
       media.push({
         id: picId,
         type: "image",
@@ -824,6 +1109,39 @@
         ...height !== void 0 ? { height } : {}
       });
       if (media.length >= MAX_TIMELINE_MEDIA) break;
+    }
+    if (!media.length && isRecord(status.page_info)) {
+      const pageInfo = status.page_info;
+      const pageType = String(pageInfo.type || "");
+      const pagePic = isRecord(pageInfo.page_pic) ? pageInfo.page_pic : {};
+      const pagePicUrl = safeWeiboMediaUrl(pagePic.url);
+      const width = optionalPositiveNumber(pagePic.width);
+      const height = optionalPositiveNumber(pagePic.height);
+      if (pageType === "video") {
+        const urls = isRecord(pageInfo.urls) ? pageInfo.urls : {};
+        const mediaInfo = isRecord(pageInfo.media_info) ? pageInfo.media_info : {};
+        const rawVideoUrl = optionalScalarText(urls.mp4_720p_mp4) || optionalScalarText(urls.mp4_hd_mp4) || optionalScalarText(urls.mp4_ld_mp4) || optionalScalarText(mediaInfo.stream_url_hd) || optionalScalarText(mediaInfo.stream_url);
+        const videoUrl = safeWeiboMediaUrl(rawVideoUrl);
+        if (videoUrl && pagePicUrl) {
+          media.push({
+            id: `${statusId}-video-0`,
+            type: "video",
+            url: videoUrl,
+            previewUrl: pagePicUrl,
+            ...width !== void 0 ? { width } : {},
+            ...height !== void 0 ? { height } : {}
+          });
+        }
+      } else if (pageType === "bigPic" && pagePicUrl) {
+        media.push({
+          id: `${statusId}-image-0`,
+          type: "image",
+          url: pagePicUrl,
+          previewUrl: pagePicUrl,
+          ...width !== void 0 ? { width } : {},
+          ...height !== void 0 ? { height } : {}
+        });
+      }
     }
     if (!media.length) {
       const fallbackUrl = safeWeiboMediaUrl(status.original_pic ?? status.bmiddle_pic ?? status.thumbnail_pic);
@@ -844,7 +1162,7 @@
     const match = /^https:\/\/([^/]+)\//i.exec(candidate);
     if (!match) return void 0;
     const host = match[1].toLowerCase();
-    const allowed = host === "sinaimg.cn" || host.endsWith(".sinaimg.cn") || host.endsWith(".weibocdn.com");
+    const allowed = host === "sinaimg.cn" || host.endsWith(".sinaimg.cn") || host === "weibocdn.com" || host.endsWith(".weibocdn.com") || host === "weibo.com" || host.endsWith(".weibo.com") || host === "sina.com.cn" || host.endsWith(".sina.com.cn") || host === "miaopai.com" || host.endsWith(".miaopai.com");
     return allowed ? candidate : void 0;
   }
   function parseWeiboDate(value) {
@@ -883,8 +1201,9 @@
     return Number.isFinite(parsed) ? new Date(parsed).toISOString() : (/* @__PURE__ */ new Date()).toISOString();
   }
   function htmlToPlainText(value) {
+    if (!value) return "";
     return decodeHtmlEntities(
-      value.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(?:p|div|li)>/gi, "\n").replace(/<[^>]*>/g, "").replace(/[ \t]+\n/g, "\n").trim()
+      value.replace(/<img[^>]*alt="([^"]+)"[^>]*>/gi, "$1").replace(/<br\s*\/?>/gi, "\n").replace(/<\/(?:p|div|li)>/gi, "\n").replace(/<[^>]*>/g, "").replace(/[ \t]+\n/g, "\n").trim()
     );
   }
   function decodeHtmlEntities(value) {
@@ -907,6 +1226,140 @@
       }
       return named[code.toLowerCase()] ?? entity;
     });
+  }
+  async function fetchSingleStatus(id, context, cookies, st) {
+    let statusData = null;
+    try {
+      const showUrl = context.origin + "/statuses/show?id=" + encodeURIComponent(id);
+      const res = await requestJson(
+        showUrl,
+        context,
+        cookies,
+        { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
+        false,
+        true
+      );
+      if (res && isRecord(res.data)) {
+        statusData = res.data;
+      }
+    } catch {
+    }
+    if (!statusData) {
+      try {
+        const detailUrl = context.origin + "/detail/" + encodeURIComponent(id);
+        const res = await flare.http.request({
+          method: "GET",
+          url: detailUrl,
+          cookies,
+          headers: {
+            ...DEFAULT_HEADERS,
+            Referer: context.origin + "/"
+          }
+        });
+        if (res.status === 200 && res.body) {
+          const match = /\$render_data\s*=\s*(\[\{.*?\}\])\[0\]\s*\|\|\s*\{/s.exec(res.body);
+          if (match) {
+            const parsed = JSON.parse(match[1]);
+            if (Array.isArray(parsed) && parsed[0] && isRecord(parsed[0].status)) {
+              statusData = parsed[0].status;
+            }
+          }
+        }
+      } catch {
+      }
+    }
+    if (!statusData) return null;
+    if (statusData.isLongText === true && st) {
+      try {
+        const extendUrl = context.origin + "/statuses/extend?id=" + encodeURIComponent(id);
+        const extendRes = await requestJson(
+          extendUrl,
+          context,
+          cookies,
+          {
+            "X-Xsrf-Token": st,
+            "Referer": context.origin + "/detail/" + encodeURIComponent(id)
+          },
+          false,
+          true
+        );
+        if (extendRes && isRecord(extendRes.data) && typeof extendRes.data.longTextContent === "string") {
+          statusData.text = extendRes.data.longTextContent;
+          statusData.raw_text = extendRes.data.longTextContent;
+        }
+      } catch {
+      }
+    }
+    return statusData;
+  }
+  function mapCommentPost(c, statusId, currentUserId, context) {
+    const commentId = String(c.idstr || c.id || "");
+    if (!commentId) return void 0;
+    const commentUser = isRecord(c.user) ? c.user : {};
+    const commentUserId = String(commentUser.id || "");
+    const author = {
+      key: { id: commentUserId || commentId, host: accountHost(context) },
+      displayName: String(commentUser.screen_name || "\u5FAE\u535A\u7528\u6237"),
+      handle: String(commentUser.screen_name || "weibo"),
+      avatarUrl: safeWeiboMediaUrl(commentUser.avatar_hd || commentUser.profile_image_url)
+    };
+    const text = typeof c.text === "string" ? htmlToPlainText(c.text) : "";
+    const likeCount = typeof c.like_count === "number" ? c.like_count : 0;
+    const isCommentLiked = c.liked === true;
+    const replyCount = typeof c.total_number === "number" ? c.total_number : typeof c.reply_count === "number" ? c.reply_count : 0;
+    const isAuthor = Boolean(commentUserId && commentUserId === currentUserId);
+    const subtitle = (optionalScalarText(c.region_name) || optionalScalarText(c.source) || "").replace(/<[^>]+>/g, "").trim();
+    const actions = [
+      {
+        action: "Reply",
+        label: "\u56DE\u590D",
+        enabled: true,
+        count: replyCount
+      },
+      {
+        action: isCommentLiked ? "Unfavourite" : "Favourite",
+        label: isCommentLiked ? "\u5DF2\u8D5E" : "\u8D5E",
+        enabled: true,
+        active: isCommentLiked,
+        count: likeCount,
+        actionToken: "comment_" + commentId
+      },
+      ...isAuthor ? [
+        {
+          action: "Delete",
+          label: "\u5220\u9664",
+          enabled: true,
+          actionToken: "comment_" + commentId
+        }
+      ] : []
+    ];
+    const post = {
+      key: { id: "comment_" + statusId + "_" + commentId, host: accountHost(context) },
+      createdAt: parseWeiboDate(typeof c.created_at === "string" ? c.created_at : void 0),
+      content: { format: "plain", value: text || " " },
+      author,
+      replyTo: { id: statusId, host: accountHost(context) },
+      actions,
+      favouritesCount: likeCount,
+      ...subtitle ? { sourceChannel: { id: "source", name: subtitle } } : {}
+    };
+    if (isRecord(c.pic)) {
+      const picObj = c.pic;
+      const large = isRecord(picObj.large) ? picObj.large : {};
+      const rawUrl = optionalScalarText(large.url) || optionalScalarText(picObj.url);
+      const url = safeWeiboMediaUrl(rawUrl);
+      if (url) {
+        post.media = [
+          {
+            id: `${commentId}-pic`,
+            type: "image",
+            url,
+            previewUrl: safeWeiboMediaUrl(picObj.url) || url
+          }
+        ];
+      }
+    }
+    return post;
   }
   async function makeSummaryPost(results, truncated, profile, context) {
     const already = results.filter((item) => item.status === "already").length;
@@ -1007,6 +1460,11 @@
     if (!isSameOrigin(url, context.origin)) {
       fail("Unsupported", "\u5FAE\u535A\u63A5\u53E3\u8DF3\u8F6C\u5230\u4E86\u6240\u9009\u8D26\u53F7\u7AD9\u70B9\u4E4B\u5916\uFF0C\u5DF2\u505C\u6B62\u8BF7\u6C42\u3002");
     }
+    const xsrfHeaders = {};
+    if (formValues.st) {
+      xsrfHeaders["X-Xsrf-Token"] = formValues.st;
+      xsrfHeaders["X-XSRF-TOKEN"] = formValues.st;
+    }
     let response;
     try {
       response = await flare.http.request({
@@ -1015,8 +1473,9 @@
         cookies,
         headers: {
           ...DEFAULT_HEADERS,
-          "Referer": context.origin + "/",
+          "Referer": extraHeaders["Referer"] || context.origin + "/",
           "X-Requested-With": "XMLHttpRequest",
+          ...xsrfHeaders,
           ...extraHeaders
         },
         body: {

@@ -1,7 +1,7 @@
 # FlareApp-Weibo-Plugin (Weibo Enhance 微博增强版)
 
 [![Flare Plugin API v1](https://img.shields.io/badge/Flare%20Plugin%20API-v1-blue)](https://github.com/DimensionDev/Flare)
-[![Version](https://img.shields.io/badge/version-0.3.2-brightgreen)](#)
+[![Version](https://img.shields.io/badge/version-0.3.5-brightgreen)](#)
 [![License](https://img.shields.io/badge/license-MIT-green)](#)
 
 专为 **Flare App**（iOS / macOS / Android / Desktop）打造的深度定制微博增强插件。支持**打开/刷新时间线自动完成关注超话签到**、**Flare 原生博文正文与热门评论流展示**、**点赞/转发/评论完整原生互动支持**、**纯净登录页直达**、**多分组标签页（好友圈、特别关注）**，并带有专属防混淆服务探测器与角标图标。

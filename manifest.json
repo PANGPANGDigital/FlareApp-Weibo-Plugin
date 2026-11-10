@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "local.plugin.p1568372ac69c4df8a99cff8ad3f57936",
-  "version": "0.3.4",
+  "version": "0.3.5",
   "name": "Weibo Enhance",
   "description": "微博最新时间线与超话自动签到：刷新时间线时自动完成超话签到。",
   "permissions": {
@@ -27,9 +27,9 @@
       {
         "id": "browser",
         "interaction": "WebCookie",
-        "title": "使用微博网页登录 (Weibo Enhance)",
+        "title": "网页登录",
         "cookie": {
-          "startUrl": "https://passport.weibo.com/sso/signin?entry=wapsso&source=wapssowb&url=https%3A%2F%2Fm.weibo.cn%2F",
+          "startUrl": "https://m.weibo.cn/login?backURL=https%3A%2F%2Fm.weibo.cn%2F",
           "probes": [
             {
               "url": "$accountOrigin/api/config",
@@ -77,7 +77,8 @@
         "operations": {
           "detail": {},
           "context": {},
-          "mutate": {}
+          "mutate": {},
+          "delete": {}
         }
       },
       "flare.datasource.compose/v1": {
