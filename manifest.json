@@ -3,9 +3,9 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "local.plugin.p1568372ac69c4df8a99cff8ad3f57936",
-  "version": "0.2.1",
-  "name": "Weibo.Plugin",
-  "description": "微博最新时间线；刷新时检查关注的超话并只为尚未签到的超话提交签到。",
+  "version": "0.2.2",
+  "name": "Weibo Enhance",
+  "description": "微博最新时间线与超话自动签到：刷新时间线时自动完成超话签到。",
   "permissions": {
     "authOrigins": [
       "https://passport.weibo.com",
@@ -16,12 +16,13 @@
   },
   "platform": {
     "id": "Plugin1568372ac69c4df8a99cff8ad3f57936",
-    "name": "Weibo.Plugin",
+    "name": "Weibo Enhance",
+    "description": "微博增强版 (支持超话自动签到)",
     "loginMethods": [
       {
         "id": "browser",
         "interaction": "WebCookie",
-        "title": "使用微博网页登录",
+        "title": "使用微博网页登录 (Weibo Enhance)",
         "cookie": {
           "startUrl": "$accountOrigin/",
           "probes": [
@@ -55,7 +56,7 @@
     "timelines": [
       {
         "id": "checkin",
-        "title": "最新微博",
+        "title": "最新微博Enhance",
         "icon": "Home",
         "defaultForNewAccount": true
       }

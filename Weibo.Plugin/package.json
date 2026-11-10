@@ -1,6 +1,6 @@
 {
-  "name": "weibo-plugin",
-  "version": "0.2.1",
+  "name": "weibo-enhance",
+  "version": "0.2.2",
   "private": true,
   "scripts": {
     "check": "tsc --noEmit",
