@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "local.plugin.p1568372ac69c4df8a99cff8ad3f57936",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "name": "Weibo Enhance",
   "description": "微博最新时间线与超话自动签到：刷新时间线时自动完成超话签到。",
   "permissions": {
@@ -16,7 +16,7 @@
     "mediaNetwork": true
   },
   "platform": {
-    "id": "Plugin1568372ac69c4df8a99cff8ad3f57936",
+    "id": "weibo-enhance",
     "name": "Weibo Enhance",
     "description": "微博增强版 (支持超话自动签到)",
     "credentialSchemaVersion": 3,
@@ -48,11 +48,12 @@
     ],
     "composeDefaults": {
       "text": {
-        "maxLength": 5000
+        "maxLength": 2000
       },
       "visibility": {
         "allowed": [
-          "public"
+          "public",
+          "followers"
         ],
         "default": "public"
       }

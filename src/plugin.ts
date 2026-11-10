@@ -415,6 +415,36 @@ defineFlareSocialPlugin({
         const credential = await readCredential();
         const id = request.key.id;
         const cursor = request.page.cursor;
+        const currentUserId = credential.profile.key.id;
+        const items: TimelineItemV1[] = [];
+
+        // On first page / refresh, prepend the root status post so Flare renders it at the top of the detail screen
+        if (!cursor) {
+          try {
+            const st = await getCsrfToken(context, credential.cookies).catch(() => undefined);
+            const statusData = await fetchSingleStatus(id, context, credential.cookies, st);
+            if (statusData) {
+              const rootPost = mapTimelinePost(statusData, context, currentUserId);
+              if (rootPost) {
+                const retweet = isRecord(statusData.retweeted_status)
+                  ? mapTimelinePost(statusData.retweeted_status as Record<string, unknown>, context, currentUserId)
+                  : undefined;
+                items.push({
+                  type: "post",
+                  post: rootPost,
+                  ...(retweet ? {
+                    presentation: {
+                      quotes: [retweet],
+                      repost: retweet,
+                    },
+                  } : {}),
+                });
+              }
+            }
+          } catch {
+            // non-fatal, proceed to comments
+          }
+        }
 
         let rootComments: unknown[] = [];
         let nextCursor: string | undefined = undefined;
@@ -519,9 +549,6 @@ defineFlareSocialPlugin({
             // ignore
           }
         }
-
-        const items: TimelineItemV1[] = [];
-        const currentUserId = credential.profile.key.id;
 
         for (const c of rootComments) {
           if (!isRecord(c)) continue;
@@ -713,8 +740,8 @@ defineFlareSocialPlugin({
 
           const isLiked = request.action === "Favourite";
           const fallbackActions: ActionDescriptorV1[] = [
-            { action: "Reply", label: "评论", enabled: true },
             { action: "Repost", label: "转发", enabled: true },
+            { action: "Reply", label: "评论", enabled: true },
             {
               action: isLiked ? "Unfavourite" : "Favourite",
               label: isLiked ? "已赞" : "赞",
@@ -1236,12 +1263,11 @@ function mapTimelinePost(
   if (repostsCount !== undefined) post.repostsCount = repostsCount;
   if (favouritesCount !== undefined) post.favouritesCount = favouritesCount;
 
-  const isLiked =
-    value.favorited === true ||
+  const isLiked = Boolean(
+    value.liked === true ||
     (typeof value.attitudes_status === "number" && value.attitudes_status > 0) ||
-    value.attitude_type === "heart" ||
-    value.liked === true;
-  const isFavorited = value.favorited === true;
+    value.attitude_type === "heart"
+  );
 
   const visible = isRecord(value.visible) ? (value.visible as Record<string, unknown>) : undefined;
   const canReblog = !visible || visible.type === undefined || visible.type === 0 || visible.type === "0";
@@ -1269,12 +1295,6 @@ function mapTimelinePost(
       enabled: true,
       active: isLiked,
       count: favouritesCount,
-    },
-    {
-      action: isFavorited ? ("Unbookmark" as const) : ("Bookmark" as const),
-      label: isFavorited ? "已收藏" : "收藏",
-      enabled: true,
-      active: isFavorited,
     },
     ...(isFromMe
       ? [
@@ -1789,18 +1809,25 @@ async function requestJson(
   return requiredObject(value);
 }
 
+let cachedSt: { token: string; expiresAt: number } | null = null;
+
 async function getCsrfToken(context: PluginInvocationContextV1, cookies: CookiePair[]): Promise<string> {
-  const xsrfCookie = cookies.find((c) => c.name.toLowerCase() === "xsrf-token");
-  if (xsrfCookie && xsrfCookie.value) {
-    return xsrfCookie.value;
+  const now = Date.now();
+  if (cachedSt && cachedSt.expiresAt > now && cachedSt.token) {
+    return cachedSt.token;
   }
   try {
     const config = await requestJson(context.origin + API_CONFIG_PATH, context, cookies, {}, false, true);
-    if (config && isRecord(config.data) && typeof config.data.st === "string") {
+    if (config && isRecord(config.data) && typeof config.data.st === "string" && config.data.st) {
+      cachedSt = { token: config.data.st, expiresAt: now + 5 * 60 * 1000 };
       return config.data.st;
     }
   } catch {
     // fallback
+  }
+  const xsrfCookie = cookies.find((c) => c.name.toLowerCase() === "xsrf-token");
+  if (xsrfCookie && xsrfCookie.value) {
+    return xsrfCookie.value;
   }
   return "";
 }
@@ -1848,16 +1875,27 @@ async function requestFormPost(
   }
 
   if (response.status === 401 || response.status === 403) {
+    cachedSt = null;
     fail("AuthenticationRequired", "微博登录状态已失效。");
   }
   if (response.status < 200 || response.status >= 300) {
+    cachedSt = null;
     fail("Remote", "微博接口返回 HTTP " + response.status + "。");
   }
 
   try {
     const value = JSON.parse(response.body);
-    return isRecord(value) ? value : null;
-  } catch {
+    if (isRecord(value)) {
+      if (value.ok !== undefined && !isOkResponse(value.ok)) {
+        cachedSt = null;
+        const msg = typeof value.msg === "string" ? value.msg : "微博接口操作失败。";
+        fail("Remote", msg);
+      }
+      return value;
+    }
+    return null;
+  } catch (err) {
+    if (isRecord(err) && typeof err.code === "string") throw err;
     return null;
   }
 }

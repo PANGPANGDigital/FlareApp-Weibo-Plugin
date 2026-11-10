@@ -343,6 +343,31 @@
           const credential = await readCredential();
           const id = request.key.id;
           const cursor = request.page.cursor;
+          const currentUserId = credential.profile.key.id;
+          const items = [];
+          if (!cursor) {
+            try {
+              const st = await getCsrfToken(context, credential.cookies).catch(() => void 0);
+              const statusData = await fetchSingleStatus(id, context, credential.cookies, st);
+              if (statusData) {
+                const rootPost = mapTimelinePost(statusData, context, currentUserId);
+                if (rootPost) {
+                  const retweet = isRecord(statusData.retweeted_status) ? mapTimelinePost(statusData.retweeted_status, context, currentUserId) : void 0;
+                  items.push({
+                    type: "post",
+                    post: rootPost,
+                    ...retweet ? {
+                      presentation: {
+                        quotes: [retweet],
+                        repost: retweet
+                      }
+                    } : {}
+                  });
+                }
+              }
+            } catch {
+            }
+          }
           let rootComments = [];
           let nextCursor = void 0;
           try {
@@ -420,8 +445,6 @@
             } catch {
             }
           }
-          const items = [];
-          const currentUserId = credential.profile.key.id;
           for (const c of rootComments) {
             if (!isRecord(c)) continue;
             const commentPost = mapCommentPost(c, id, currentUserId, context);
@@ -592,8 +615,8 @@
             }
             const isLiked = request.action === "Favourite";
             const fallbackActions = [
-              { action: "Reply", label: "\u8BC4\u8BBA", enabled: true },
               { action: "Repost", label: "\u8F6C\u53D1", enabled: true },
+              { action: "Reply", label: "\u8BC4\u8BBA", enabled: true },
               {
                 action: isLiked ? "Unfavourite" : "Favourite",
                 label: isLiked ? "\u5DF2\u8D5E" : "\u8D5E",
@@ -1000,8 +1023,9 @@
     if (repliesCount !== void 0) post.repliesCount = repliesCount;
     if (repostsCount !== void 0) post.repostsCount = repostsCount;
     if (favouritesCount !== void 0) post.favouritesCount = favouritesCount;
-    const isLiked = value.favorited === true || typeof value.attitudes_status === "number" && value.attitudes_status > 0 || value.attitude_type === "heart" || value.liked === true;
-    const isFavorited = value.favorited === true;
+    const isLiked = Boolean(
+      value.liked === true || typeof value.attitudes_status === "number" && value.attitudes_status > 0 || value.attitude_type === "heart"
+    );
     const visible = isRecord(value.visible) ? value.visible : void 0;
     const canReblog = !visible || visible.type === void 0 || visible.type === 0 || visible.type === "0";
     const actions = [
@@ -1025,12 +1049,6 @@
         enabled: true,
         active: isLiked,
         count: favouritesCount
-      },
-      {
-        action: isFavorited ? "Unbookmark" : "Bookmark",
-        label: isFavorited ? "\u5DF2\u6536\u85CF" : "\u6536\u85CF",
-        enabled: true,
-        active: isFavorited
       },
       ...isFromMe ? [
         {
@@ -1442,17 +1460,23 @@
     }
     return requiredObject(value);
   }
+  var cachedSt = null;
   async function getCsrfToken(context, cookies) {
-    const xsrfCookie = cookies.find((c) => c.name.toLowerCase() === "xsrf-token");
-    if (xsrfCookie && xsrfCookie.value) {
-      return xsrfCookie.value;
+    const now = Date.now();
+    if (cachedSt && cachedSt.expiresAt > now && cachedSt.token) {
+      return cachedSt.token;
     }
     try {
       const config = await requestJson(context.origin + API_CONFIG_PATH, context, cookies, {}, false, true);
-      if (config && isRecord(config.data) && typeof config.data.st === "string") {
+      if (config && isRecord(config.data) && typeof config.data.st === "string" && config.data.st) {
+        cachedSt = { token: config.data.st, expiresAt: now + 5 * 60 * 1e3 };
         return config.data.st;
       }
     } catch {
+    }
+    const xsrfCookie = cookies.find((c) => c.name.toLowerCase() === "xsrf-token");
+    if (xsrfCookie && xsrfCookie.value) {
+      return xsrfCookie.value;
     }
     return "";
   }
@@ -1490,15 +1514,26 @@
       throw error;
     }
     if (response.status === 401 || response.status === 403) {
+      cachedSt = null;
       fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\u3002");
     }
     if (response.status < 200 || response.status >= 300) {
+      cachedSt = null;
       fail("Remote", "\u5FAE\u535A\u63A5\u53E3\u8FD4\u56DE HTTP " + response.status + "\u3002");
     }
     try {
       const value = JSON.parse(response.body);
-      return isRecord(value) ? value : null;
-    } catch {
+      if (isRecord(value)) {
+        if (value.ok !== void 0 && !isOkResponse(value.ok)) {
+          cachedSt = null;
+          const msg = typeof value.msg === "string" ? value.msg : "\u5FAE\u535A\u63A5\u53E3\u64CD\u4F5C\u5931\u8D25\u3002";
+          fail("Remote", msg);
+        }
+        return value;
+      }
+      return null;
+    } catch (err) {
+      if (isRecord(err) && typeof err.code === "string") throw err;
       return null;
     }
   }
