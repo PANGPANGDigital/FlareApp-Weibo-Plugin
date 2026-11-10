@@ -2,7 +2,6 @@
 (() => {
   // src/plugin.ts
   var API_CONFIG_PATH = "/api/config";
-  var PROFILE_PATH = "/profile/info";
   var FRIENDS_TIMELINE_PATH = "/feed/friends";
   var TOPICS_PATH = "/api/container/getIndex?containerid=100803_-_followsuper";
   var TOPICS_FALLBACK_PATH = "/api/container/getIndex?containerid=100803_-_page_my_follow_super";
@@ -88,32 +87,37 @@
           const config = await requestJson(probeUrl, context, cookies, {}, true, true);
           if (!config || !isLoggedIn(config)) return { type: "pending" };
           const configData = isRecord(config.data) ? config.data : {};
+          const uid = configData.uid ? String(configData.uid) : "";
           let user = null;
           if (isRecord(configData.user)) {
             user = configData.user;
-          } else if (configData.uid) {
-            user = {
-              id: configData.uid,
-              screen_name: configData.screen_name || String(configData.uid)
-            };
           }
-          if (!user || !user.screen_name) {
+          if (uid && (!user || !user.avatar_hd || !user.screen_name)) {
             try {
-              const profileResponse = await requestJson(
-                context.origin + PROFILE_PATH,
+              const userIndex = await requestJson(
+                context.origin + "/api/container/getIndex?type=uid&value=" + encodeURIComponent(uid),
                 context,
                 cookies,
                 {},
                 true,
                 true
               );
-              if (profileResponse && isRecord(profileResponse.data) && isRecord(profileResponse.data.user)) {
-                user = profileResponse.data.user;
+              if (userIndex && isRecord(userIndex.data) && isRecord(userIndex.data.userInfo)) {
+                user = {
+                  ...user || {},
+                  ...userIndex.data.userInfo
+                };
               }
             } catch {
             }
           }
-          if (!user) {
+          if (!user && uid) {
+            user = {
+              id: uid,
+              screen_name: configData.screen_name ? String(configData.screen_name) : uid
+            };
+          }
+          if (!user || !user.id && !user.idstr) {
             return { type: "pending" };
           }
           const profile = mapProfile(user, context);
@@ -125,7 +129,10 @@
               origin: context.origin,
               credential,
               profile,
-              capabilities: { "flare.datasource.timeline/v1": ["page"] }
+              capabilities: {
+                "flare.datasource.timeline/v1": ["page"],
+                "flare.datasource.tab-catalog/v1": ["page"]
+              }
             }
           };
         }
@@ -134,16 +141,40 @@
     capabilities: {
       timeline: {
         async page(request, context) {
-          if (request.timelineId && request.timelineId !== "checkin" && request.timelineId !== "friends") {
-            fail("Unsupported", "Unknown timeline");
+          const credential = await readCredential();
+          if (!credential.profile.avatarUrl && credential.profile.key.id) {
+            try {
+              const userIndex = await requestJson(
+                context.origin + "/api/container/getIndex?type=uid&value=" + encodeURIComponent(credential.profile.key.id),
+                context,
+                credential.cookies,
+                {},
+                true,
+                true
+              );
+              if (userIndex && isRecord(userIndex.data) && isRecord(userIndex.data.userInfo)) {
+                const uInfo = userIndex.data.userInfo;
+                const avatarUrl = safeWeiboMediaUrl(uInfo.avatar_hd ?? uInfo.profile_image_url);
+                const screenName = requiredScalarText(uInfo.screen_name ?? credential.profile.displayName);
+                if (avatarUrl || screenName) {
+                  credential.profile = {
+                    ...credential.profile,
+                    ...screenName ? { displayName: screenName, handle: screenName } : {},
+                    ...avatarUrl ? { avatarUrl } : {}
+                  };
+                  await flare.credential.replace(credential);
+                }
+              }
+            } catch {
+            }
           }
+          const timelineId = request.timelineId || "checkin";
           if (request.page.direction !== "refresh" && request.page.direction !== "older") {
             return { items: [], endReached: true };
           }
-          const credential = await readCredential();
           const items = [];
           const isTopOrRefresh = request.page.direction === "refresh" || !request.page.cursor;
-          if (isTopOrRefresh) {
+          if (timelineId === "checkin" && isTopOrRefresh) {
             const results = [];
             let truncated = false;
             try {
@@ -164,16 +195,45 @@
             }
             items.push(await makeSummaryPost(results, truncated, credential.profile, context));
           }
-          const feedPage = await fetchFriendsTimeline(
+          let feedEndpoint = FRIENDS_TIMELINE_PATH;
+          if (timelineId === "special") {
+            feedEndpoint = "/feed/group?gid=1000";
+          } else if (timelineId.startsWith("group:")) {
+            feedEndpoint = "/feed/group?gid=" + encodeURIComponent(timelineId.slice("group:".length));
+          }
+          const cursor = request.page.direction === "older" ? request.page.cursor : void 0;
+          const feedPage = await fetchTimelineFeed(
+            feedEndpoint,
             context,
             credential.cookies,
-            request.page.direction === "older" ? request.page.cursor : void 0
+            cursor
           );
           items.push(...feedPage.items);
           return {
             items,
             endReached: !feedPage.olderCursor,
             ...feedPage.olderCursor ? { olderCursor: feedPage.olderCursor } : {}
+          };
+        }
+      },
+      tabCatalog: {
+        async page(_request, _context) {
+          return {
+            items: [
+              {
+                id: "weibo_groups",
+                title: { value: "\u5FAE\u535A\u5206\u7EC4" },
+                timelines: {
+                  items: [
+                    { id: "checkin", title: { value: "\u6700\u65B0\u5FAE\u535AEnhance" }, icon: "Home" },
+                    { id: "friends", title: { value: "\u597D\u53CB\u5708" }, icon: "Heart" },
+                    { id: "special", title: { value: "\u7279\u522B\u5173\u6CE8" }, icon: "Featured" }
+                  ],
+                  endReached: true
+                }
+              }
+            ],
+            endReached: true
           };
         }
       }
@@ -311,8 +371,11 @@
       return { name: topic.name, status: "failed", message: "\u7B7E\u5230\u8BF7\u6C42\u5931\u8D25\u6216\u88AB\u98CE\u63A7\u3002" };
     }
   }
-  async function fetchFriendsTimeline(context, cookies, cursor) {
-    const url = context.origin + FRIENDS_TIMELINE_PATH + (cursor ? "?max_id=" + encodeURIComponent(cursor) : "");
+  async function fetchTimelineFeed(path, context, cookies, cursor) {
+    let url = context.origin + path;
+    if (cursor) {
+      url += (path.includes("?") ? "&" : "?") + "max_id=" + encodeURIComponent(cursor);
+    }
     let response = null;
     try {
       response = await requestJson(url, context, cookies, {}, false, true);
@@ -328,7 +391,7 @@
       return { items: [] };
     }
     const items = data.statuses.map((status) => mapTimelineStatus(status, context)).filter((item) => item !== void 0);
-    const rawCursor = data.next_cursor_str ?? data.next_cursor;
+    const rawCursor = data.next_cursor_str ?? data.next_cursor ?? data.since_id_str ?? data.since_id;
     const olderCursor = optionalScalarText(rawCursor);
     return {
       items,
@@ -515,12 +578,18 @@
     if (checked === 0) {
       lines.push("\uFF08\u672A\u626B\u63CF\u5230\u5173\u6CE8\u7684\u8D85\u8BDD\uFF0C\u8BF7\u786E\u8BA4\u5FAE\u535A\u8D26\u53F7\u5DF2\u5173\u6CE8\u8D85\u8BDD\uFF09");
     }
+    const summaryAuthor = {
+      key: { id: "checkin-helper", host: accountHost(context) },
+      displayName: "\u8D85\u8BDD\u7B7E\u5230",
+      handle: "checkin",
+      ...profile.avatarUrl ? { avatarUrl: profile.avatarUrl } : {}
+    };
     return {
       type: "post",
       post: {
         key: { id: "checkin-summary-" + await flare.crypto.uuid(), host: accountHost(context) },
         createdAt: now.toISOString(),
-        author: profile,
+        author: summaryAuthor,
         content: { format: "plain", value: lines.join("\n") },
         detailType: "link",
         url: context.origin + "/"

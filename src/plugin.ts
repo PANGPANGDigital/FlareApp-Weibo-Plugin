@@ -115,36 +115,43 @@ defineFlareSocialPlugin({
         if (!config || !isLoggedIn(config)) return { type: "pending" };
 
         const configData = isRecord(config.data) ? config.data : {};
+        const uid = configData.uid ? String(configData.uid) : "";
 
         let user: Record<string, unknown> | null = null;
         if (isRecord(configData.user)) {
           user = configData.user;
-        } else if (configData.uid) {
-          user = {
-            id: configData.uid,
-            screen_name: configData.screen_name || String(configData.uid),
-          };
         }
 
-        if (!user || !user.screen_name) {
+        // Fetch real user info (nickname & avatar) from /api/container/getIndex?type=uid&value=...
+        if (uid && (!user || !user.avatar_hd || !user.screen_name)) {
           try {
-            const profileResponse = await requestJson(
-              context.origin + PROFILE_PATH,
+            const userIndex = await requestJson(
+              context.origin + "/api/container/getIndex?type=uid&value=" + encodeURIComponent(uid),
               context,
               cookies,
               {},
               true,
               true,
             );
-            if (profileResponse && isRecord(profileResponse.data) && isRecord(profileResponse.data.user)) {
-              user = profileResponse.data.user;
+            if (userIndex && isRecord(userIndex.data) && isRecord(userIndex.data.userInfo)) {
+              user = {
+                ...(user || {}),
+                ...userIndex.data.userInfo,
+              };
             }
           } catch {
-            // profile/info is optional
+            // fallback
           }
         }
 
-        if (!user) {
+        if (!user && uid) {
+          user = {
+            id: uid,
+            screen_name: configData.screen_name ? String(configData.screen_name) : uid,
+          };
+        }
+
+        if (!user || (!user.id && !user.idstr)) {
           return { type: "pending" };
         }
 
@@ -158,7 +165,10 @@ defineFlareSocialPlugin({
             origin: context.origin,
             credential: credential as unknown as JsonValue,
             profile,
-            capabilities: { "flare.datasource.timeline/v1": ["page"] },
+            capabilities: {
+              "flare.datasource.timeline/v1": ["page"],
+              "flare.datasource.tab-catalog/v1": ["page"],
+            },
           },
         };
       },
@@ -167,21 +177,49 @@ defineFlareSocialPlugin({
   capabilities: {
     timeline: {
       async page(request, context) {
-        if (request.timelineId && request.timelineId !== "checkin" && request.timelineId !== "friends") {
-          fail("Unsupported", "Unknown timeline");
+        const credential = await readCredential();
+
+        // Self-heal avatar & nickname if missing from initial login
+        if (!credential.profile.avatarUrl && credential.profile.key.id) {
+          try {
+            const userIndex = await requestJson(
+              context.origin + "/api/container/getIndex?type=uid&value=" + encodeURIComponent(credential.profile.key.id),
+              context,
+              credential.cookies,
+              {},
+              true,
+              true,
+            );
+            if (userIndex && isRecord(userIndex.data) && isRecord(userIndex.data.userInfo)) {
+              const uInfo = userIndex.data.userInfo;
+              const avatarUrl = safeWeiboMediaUrl(uInfo.avatar_hd ?? uInfo.profile_image_url);
+              const screenName = requiredScalarText(uInfo.screen_name ?? credential.profile.displayName);
+              if (avatarUrl || screenName) {
+                credential.profile = {
+                  ...credential.profile,
+                  ...(screenName ? { displayName: screenName, handle: screenName } : {}),
+                  ...(avatarUrl ? { avatarUrl } : {}),
+                };
+                await flare.credential.replace(credential as unknown as JsonValue);
+              }
+            }
+          } catch {
+            // non-fatal
+          }
         }
+
+        const timelineId = request.timelineId || "checkin";
         if (request.page.direction !== "refresh" && request.page.direction !== "older") {
           return { items: [], endReached: true };
         }
 
-        const credential = await readCredential();
         const items: TimelineItemV1[] = [];
-
         const isTopOrRefresh =
           request.page.direction === "refresh" ||
           !request.page.cursor;
 
-        if (isTopOrRefresh) {
+        // Super topic checkin runs exclusively on the main "checkin" timeline
+        if (timelineId === "checkin" && isTopOrRefresh) {
           const results: TopicResult[] = [];
           let truncated = false;
 
@@ -209,10 +247,20 @@ defineFlareSocialPlugin({
           items.push(await makeSummaryPost(results, truncated, credential.profile, context));
         }
 
-        const feedPage = await fetchFriendsTimeline(
+        // Determine feed endpoint based on timelineId
+        let feedEndpoint = FRIENDS_TIMELINE_PATH;
+        if (timelineId === "special") {
+          feedEndpoint = "/feed/group?gid=1000";
+        } else if (timelineId.startsWith("group:")) {
+          feedEndpoint = "/feed/group?gid=" + encodeURIComponent(timelineId.slice("group:".length));
+        }
+
+        const cursor = request.page.direction === "older" ? request.page.cursor : undefined;
+        const feedPage = await fetchTimelineFeed(
+          feedEndpoint,
           context,
           credential.cookies,
-          request.page.direction === "older" ? request.page.cursor : undefined,
+          cursor,
         );
         items.push(...feedPage.items);
 
@@ -220,6 +268,28 @@ defineFlareSocialPlugin({
           items,
           endReached: !feedPage.olderCursor,
           ...(feedPage.olderCursor ? { olderCursor: feedPage.olderCursor } : {}),
+        };
+      },
+    },
+
+    tabCatalog: {
+      async page(_request, _context) {
+        return {
+          items: [
+            {
+              id: "weibo_groups",
+              title: { value: "微博分组" },
+              timelines: {
+                items: [
+                  { id: "checkin", title: { value: "最新微博Enhance" }, icon: "Home" },
+                  { id: "friends", title: { value: "好友圈" }, icon: "Heart" },
+                  { id: "special", title: { value: "特别关注" }, icon: "Featured" },
+                ],
+                endReached: true,
+              },
+            },
+          ],
+          endReached: true,
         };
       },
     },
@@ -406,13 +476,16 @@ async function checkInTopic(
   }
 }
 
-async function fetchFriendsTimeline(
+async function fetchTimelineFeed(
+  path: string,
   context: PluginInvocationContextV1,
   cookies: CookiePair[],
   cursor?: string,
 ): Promise<{ items: TimelineItemV1[]; olderCursor?: string }> {
-  const url = context.origin + FRIENDS_TIMELINE_PATH +
-    (cursor ? "?max_id=" + encodeURIComponent(cursor) : "");
+  let url = context.origin + path;
+  if (cursor) {
+    url += (path.includes("?") ? "&" : "?") + "max_id=" + encodeURIComponent(cursor);
+  }
   let response: Record<string, unknown> | null = null;
   try {
     response = await requestJson(url, context, cookies, {}, false, true);
@@ -432,7 +505,7 @@ async function fetchFriendsTimeline(
   const items = data.statuses
     .map((status) => mapTimelineStatus(status, context))
     .filter((item): item is TimelineItemV1 => item !== undefined);
-  const rawCursor = data.next_cursor_str ?? data.next_cursor;
+  const rawCursor = data.next_cursor_str ?? data.next_cursor ?? data.since_id_str ?? data.since_id;
   const olderCursor = optionalScalarText(rawCursor);
 
   return {
@@ -644,12 +717,19 @@ async function makeSummaryPost(
     lines.push("（未扫描到关注的超话，请确认微博账号已关注超话）");
   }
 
+  const summaryAuthor: ProfileV1 = {
+    key: { id: "checkin-helper", host: accountHost(context) },
+    displayName: "超话签到",
+    handle: "checkin",
+    ...(profile.avatarUrl ? { avatarUrl: profile.avatarUrl } : {}),
+  };
+
   return {
     type: "post",
     post: {
       key: { id: "checkin-summary-" + (await flare.crypto.uuid()), host: accountHost(context) },
       createdAt: now.toISOString(),
-      author: profile,
+      author: summaryAuthor,
       content: { format: "plain", value: lines.join("\n") },
       detailType: "link",
       url: context.origin + "/",
