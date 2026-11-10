@@ -462,68 +462,51 @@
           const numericStatusId = /^\d+$/.test(statusId) ? statusId : bidToMid(statusId) || statusId;
           if (isComment) {
             if (request.action === "Favourite") {
-              const res = await requestFormPost(
+              await performLikeAction(
                 context.origin + "/api/likes/update",
-                { id: commentId, type: "comment", st },
+                { id: commentId, type: "comment" },
                 context,
                 credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                false
               );
-              if (!res || !isOkResponse(res.ok)) {
-                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u70B9\u8D5E\u8BC4\u8BBA\u5931\u8D25\u3002";
-                fail("Remote", msg);
-              }
               return { type: "noChange" };
             } else if (request.action === "Unfavourite") {
-              const res = await requestFormPost(
+              await performLikeAction(
                 context.origin + "/api/likes/destroy",
-                { id: commentId, type: "comment", st },
+                { id: commentId, type: "comment" },
                 context,
                 credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                true
               );
-              if (!res || !isOkResponse(res.ok)) {
-                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u53D6\u6D88\u70B9\u8D5E\u8BC4\u8BBA\u5931\u8D25\u3002";
-                fail("Remote", msg);
-              }
               return { type: "noChange" };
             } else if (request.action === "Delete") {
               await requestFormPost(
                 context.origin + "/comments/destroy",
                 { cid: commentId, st },
                 context,
-                credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                credential.cookies
               );
               return { type: "deleted" };
             }
             return { type: "noChange" };
           } else {
             if (request.action === "Favourite") {
-              const res = await requestFormPost(
+              await performLikeAction(
                 context.origin + "/api/attitudes/create",
-                { id: numericStatusId, attitude: "heart", st },
+                { id: numericStatusId, attitude: "heart" },
                 context,
                 credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                false
               );
-              if (!res || !isOkResponse(res.ok)) {
-                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u70B9\u8D5E\u5931\u8D25\u3002";
-                fail("Remote", msg);
-              }
               return { type: "noChange" };
             } else if (request.action === "Unfavourite") {
-              const res = await requestFormPost(
+              await performLikeAction(
                 context.origin + "/api/attitudes/destroy",
-                { id: numericStatusId, attitude: "heart", st },
+                { id: numericStatusId, attitude: "heart" },
                 context,
                 credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                true
               );
-              if (!res || !isOkResponse(res.ok)) {
-                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u53D6\u6D88\u70B9\u8D5E\u5931\u8D25\u3002";
-                fail("Remote", msg);
-              }
               return { type: "noChange" };
             } else if (request.action === "Repost") {
               const content = request.parameters?.content || "\u8F6C\u53D1\u5FAE\u535A";
@@ -531,8 +514,7 @@
                 context.origin + "/api/statuses/repost",
                 { id: numericStatusId, mid: numericStatusId, content, st },
                 context,
-                credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                credential.cookies
               );
               if (!res || !isOkResponse(res.ok)) {
                 const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u8F6C\u53D1\u5931\u8D25\u3002";
@@ -544,8 +526,7 @@
                 context.origin + "/api/statuses/createfav",
                 { id: numericStatusId, st },
                 context,
-                credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                credential.cookies
               );
               return { type: "noChange" };
             } else if (request.action === "Unbookmark") {
@@ -553,8 +534,7 @@
                 context.origin + "/api/statuses/destroyfav",
                 { id: numericStatusId, st },
                 context,
-                credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                credential.cookies
               );
               return { type: "noChange" };
             } else if (request.action === "Delete") {
@@ -1670,13 +1650,13 @@
     }
     return "";
   }
-  async function requestFormPost(url, formValues, context, cookies, extraHeaders = {}) {
+  async function requestFormPost(url, formValues, context, cookies, extraHeaders = {}, allowNonOk = false) {
     if (!isSameOrigin(url, context.origin)) {
       fail("Unsupported", "\u5FAE\u535A\u63A5\u53E3\u8DF3\u8F6C\u5230\u4E86\u6240\u9009\u8D26\u53F7\u7AD9\u70B9\u4E4B\u5916\uFF0C\u5DF2\u505C\u6B62\u8BF7\u6C42\u3002");
     }
     const xsrfHeaders = {};
     if (formValues.st) {
-      xsrfHeaders["X-XSRF-TOKEN"] = formValues.st;
+      xsrfHeaders["X-Xsrf-Token"] = formValues.st;
     }
     const mergedHeaders = mergeHeaders(
       DEFAULT_HEADERS,
@@ -1723,12 +1703,46 @@
       cachedSt = null;
       fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
     }
-    if (obj.ok !== void 0 && !isOkResponse(obj.ok)) {
+    if (!allowNonOk && obj.ok !== void 0 && !isOkResponse(obj.ok)) {
       cachedSt = null;
       const msg = typeof obj.msg === "string" ? obj.msg : "\u5FAE\u535A\u63A5\u53E3\u64CD\u4F5C\u5931\u8D25\u3002";
       fail("Remote", msg);
     }
     return obj;
+  }
+  async function performLikeAction(url, form, context, cookies, isUnlike = false) {
+    let st = await getCsrfToken(context, cookies);
+    if (!st) {
+      fail("AuthenticationRequired", "\u65E0\u6CD5\u83B7\u53D6\u5FAE\u535A\u5B89\u5168\u51ED\u8BC1 (st)\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
+    }
+    form.st = st;
+    let res = await requestFormPost(url, form, context, cookies, {}, true);
+    if (res && res.ok !== 1) {
+      const msg2 = typeof res.msg === "string" ? res.msg : "";
+      const isStError = msg2.includes("st") || msg2.includes("token") || msg2.includes("\u767B\u5F55") || res.ok === -100 || res.ok === 0 && !msg2;
+      if (isStError) {
+        cachedSt = null;
+        const freshSt = await getCsrfToken(context, cookies);
+        if (freshSt && freshSt !== st) {
+          form.st = freshSt;
+          res = await requestFormPost(url, form, context, cookies, {}, true);
+        }
+      }
+    }
+    if (!res) {
+      fail("Remote", isUnlike ? "\u53D6\u6D88\u70B9\u8D5E\u5931\u8D25\u3002" : "\u70B9\u8D5E\u5931\u8D25\u3002");
+    }
+    if (isOkResponse(res.ok)) {
+      return;
+    }
+    const msg = typeof res.msg === "string" ? res.msg : "";
+    if (!isUnlike && (msg.includes("\u8D5E\u8FC7") || msg.includes("\u5DF2\u70B9\u8D5E") || msg.includes("\u5DF2\u8D5E") || msg.includes("exist") || msg.includes("100001"))) {
+      return;
+    }
+    if (isUnlike && (msg.includes("\u672A\u8D5E") || msg.includes("\u672A\u70B9\u8D5E") || msg.includes("\u6CA1\u6709\u8D5E") || msg.includes("\u4E0D\u5B58\u5728"))) {
+      return;
+    }
+    fail("Remote", msg || (isUnlike ? "\u53D6\u6D88\u70B9\u8D5E\u5931\u8D25\u3002" : "\u70B9\u8D5E\u5931\u8D25\u3002"));
   }
   async function readCredential() {
     const value = await flare.credential.read();

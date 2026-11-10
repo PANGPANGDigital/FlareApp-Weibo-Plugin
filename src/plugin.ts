@@ -570,30 +570,22 @@ defineFlareSocialPlugin({
         if (isComment) {
           // Comment action: Favourite / Unfavourite, Delete
           if (request.action === "Favourite") {
-            const res = await requestFormPost(
+            await performLikeAction(
               context.origin + "/api/likes/update",
-              { id: commentId, type: "comment", st },
+              { id: commentId, type: "comment" },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
+              false,
             );
-            if (!res || !isOkResponse(res.ok)) {
-              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "点赞评论失败。";
-              fail("Remote", msg);
-            }
             return { type: "noChange" };
           } else if (request.action === "Unfavourite") {
-            const res = await requestFormPost(
+            await performLikeAction(
               context.origin + "/api/likes/destroy",
-              { id: commentId, type: "comment", st },
+              { id: commentId, type: "comment" },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
+              true,
             );
-            if (!res || !isOkResponse(res.ok)) {
-              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "取消点赞评论失败。";
-              fail("Remote", msg);
-            }
             return { type: "noChange" };
           } else if (request.action === "Delete") {
             await requestFormPost(
@@ -601,7 +593,6 @@ defineFlareSocialPlugin({
               { cid: commentId, st },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
             return { type: "deleted" };
           }
@@ -610,30 +601,22 @@ defineFlareSocialPlugin({
         } else {
           // Status action: Favourite / Unfavourite, Repost, Bookmark / Unbookmark, Delete
           if (request.action === "Favourite") {
-            const res = await requestFormPost(
+            await performLikeAction(
               context.origin + "/api/attitudes/create",
-              { id: numericStatusId, attitude: "heart", st },
+              { id: numericStatusId, attitude: "heart" },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
+              false,
             );
-            if (!res || !isOkResponse(res.ok)) {
-              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "点赞失败。";
-              fail("Remote", msg);
-            }
             return { type: "noChange" };
           } else if (request.action === "Unfavourite") {
-            const res = await requestFormPost(
+            await performLikeAction(
               context.origin + "/api/attitudes/destroy",
-              { id: numericStatusId, attitude: "heart", st },
+              { id: numericStatusId, attitude: "heart" },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
+              true,
             );
-            if (!res || !isOkResponse(res.ok)) {
-              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "取消点赞失败。";
-              fail("Remote", msg);
-            }
             return { type: "noChange" };
           } else if (request.action === "Repost") {
             const content = request.parameters?.content || "转发微博";
@@ -642,7 +625,6 @@ defineFlareSocialPlugin({
               { id: numericStatusId, mid: numericStatusId, content, st },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
             if (!res || !isOkResponse(res.ok)) {
               const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "转发失败。";
@@ -655,7 +637,6 @@ defineFlareSocialPlugin({
               { id: numericStatusId, st },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
             return { type: "noChange" };
           } else if (request.action === "Unbookmark") {
@@ -664,7 +645,6 @@ defineFlareSocialPlugin({
               { id: numericStatusId, st },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
             );
             return { type: "noChange" };
           } else if (request.action === "Delete") {
@@ -2066,6 +2046,7 @@ async function requestFormPost(
   context: PluginInvocationContextV1,
   cookies: CookiePair[],
   extraHeaders: Record<string, string> = {},
+  allowNonOk = false,
 ): Promise<Record<string, unknown> | null> {
   if (!isSameOrigin(url, context.origin)) {
     fail("Unsupported", "微博接口跳转到了所选账号站点之外，已停止请求。");
@@ -2073,7 +2054,7 @@ async function requestFormPost(
 
   const xsrfHeaders: Record<string, string> = {};
   if (formValues.st) {
-    xsrfHeaders["X-XSRF-TOKEN"] = formValues.st;
+    xsrfHeaders["X-Xsrf-Token"] = formValues.st;
   }
 
   const mergedHeaders = mergeHeaders(
@@ -2125,12 +2106,68 @@ async function requestFormPost(
     cachedSt = null;
     fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
   }
-  if (obj.ok !== undefined && !isOkResponse(obj.ok)) {
+  if (!allowNonOk && obj.ok !== undefined && !isOkResponse(obj.ok)) {
     cachedSt = null;
     const msg = typeof obj.msg === "string" ? obj.msg : "微博接口操作失败。";
     fail("Remote", msg);
   }
   return obj;
+}
+
+async function performLikeAction(
+  url: string,
+  form: Record<string, string>,
+  context: PluginInvocationContextV1,
+  cookies: CookiePair[],
+  isUnlike = false,
+): Promise<void> {
+  let st = await getCsrfToken(context, cookies);
+  if (!st) {
+    fail("AuthenticationRequired", "无法获取微博安全凭证 (st)，请重新登录。");
+  }
+  form.st = st;
+
+  let res = await requestFormPost(url, form, context, cookies, {}, true);
+
+  // If st was stale or invalid, try refreshing st once
+  if (res && res.ok !== 1) {
+    const msg = typeof res.msg === "string" ? res.msg : "";
+    const isStError =
+      msg.includes("st") ||
+      msg.includes("token") ||
+      msg.includes("登录") ||
+      res.ok === -100 ||
+      (res.ok === 0 && !msg);
+    if (isStError) {
+      cachedSt = null;
+      const freshSt = await getCsrfToken(context, cookies);
+      if (freshSt && freshSt !== st) {
+        form.st = freshSt;
+        res = await requestFormPost(url, form, context, cookies, {}, true);
+      }
+    }
+  }
+
+  if (!res) {
+    fail("Remote", isUnlike ? "取消点赞失败。" : "点赞失败。");
+  }
+
+  if (isOkResponse(res.ok)) {
+    return;
+  }
+
+  const msg = typeof res.msg === "string" ? res.msg : "";
+  // Check for idempotent success:
+  // If liking: "已赞", "已经赞过", "已点赞", "已经赞过了哦", "attitude has existed", "100001" etc.
+  // If unliking: "未赞", "未点赞", "没有赞", "不存在" etc.
+  if (!isUnlike && (msg.includes("赞过") || msg.includes("已点赞") || msg.includes("已赞") || msg.includes("exist") || msg.includes("100001"))) {
+    return;
+  }
+  if (isUnlike && (msg.includes("未赞") || msg.includes("未点赞") || msg.includes("没有赞") || msg.includes("不存在"))) {
+    return;
+  }
+
+  fail("Remote", msg || (isUnlike ? "取消点赞失败。" : "点赞失败。"));
 }
 
 async function readCredential(): Promise<StoredCredential> {
