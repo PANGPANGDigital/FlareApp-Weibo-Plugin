@@ -3,11 +3,12 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "local.plugin.p1568372ac69c4df8a99cff8ad3f57936",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "name": "Weibo Enhance",
   "description": "微博最新时间线与超话自动签到：刷新时间线时自动完成超话签到。",
   "permissions": {
     "authOrigins": [
+      "https://m.weibo.cn",
       "https://passport.weibo.com",
       "https://passport.weibo.cn",
       "https://login.sina.com.cn"
@@ -18,7 +19,7 @@
     "id": "Plugin1568372ac69c4df8a99cff8ad3f57936",
     "name": "Weibo Enhance",
     "description": "微博增强版 (支持超话自动签到)",
-    "credentialSchemaVersion": 2,
+    "credentialSchemaVersion": 3,
     "detector": {
       "priority": 1000
     },
@@ -28,7 +29,7 @@
         "interaction": "WebCookie",
         "title": "使用微博网页登录 (Weibo Enhance)",
         "cookie": {
-          "startUrl": "$accountOrigin/",
+          "startUrl": "https://passport.weibo.com/sso/signin?entry=wapsso&source=wapssowb&url=https%3A%2F%2Fm.weibo.cn%2F",
           "probes": [
             {
               "url": "$accountOrigin/api/config",
@@ -45,6 +46,17 @@
         }
       }
     ],
+    "composeDefaults": {
+      "text": {
+        "maxLength": 5000
+      },
+      "visibility": {
+        "allowed": [
+          "public"
+        ],
+        "default": "public"
+      }
+    },
     "capabilities": {
       "flare.datasource.timeline/v1": {
         "operations": {
@@ -64,7 +76,13 @@
       "flare.datasource.post/v1": {
         "operations": {
           "detail": {},
-          "context": {}
+          "context": {},
+          "mutate": {}
+        }
+      },
+      "flare.datasource.compose/v1": {
+        "operations": {
+          "publish": {}
         }
       },
       "flare.datasource.profile/v1": {

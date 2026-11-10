@@ -68,8 +68,11 @@
     },
     login: {
       browser: {
-        async begin(_request, context) {
-          return { type: "webCookie", startUrl: context.origin + "/" };
+        async begin(_request, _context) {
+          return {
+            type: "webCookie",
+            startUrl: "https://passport.weibo.com/sso/signin?entry=wapsso&source=wapssowb&url=https%3A%2F%2Fm.weibo.cn%2F"
+          };
         },
         async check(request, context) {
           const probeUrl = context.origin + API_CONFIG_PATH;
@@ -151,7 +154,8 @@
               capabilities: {
                 "flare.datasource.timeline/v1": ["page"],
                 "flare.datasource.tab-catalog/v1": ["page"],
-                "flare.datasource.post/v1": ["detail", "context"],
+                "flare.datasource.post/v1": ["detail", "context", "mutate"],
+                "flare.datasource.compose/v1": ["publish"],
                 "flare.datasource.profile/v1": ["byId", "byHandle"]
               }
             }
@@ -312,6 +316,21 @@
             };
             const text = typeof c.text === "string" ? htmlToPlainText(c.text) : "";
             const likeCount = typeof c.like_count === "number" ? c.like_count : void 0;
+            const isCommentLiked = c.liked === true;
+            const commentActions = [
+              {
+                action: "Reply",
+                label: "\u56DE\u590D",
+                enabled: true
+              },
+              {
+                action: isCommentLiked ? "Unfavourite" : "Favourite",
+                label: isCommentLiked ? "\u5DF2\u8D5E" : "\u8D5E",
+                enabled: true,
+                active: isCommentLiked,
+                count: likeCount
+              }
+            ];
             items.push({
               type: "post",
               post: {
@@ -320,6 +339,7 @@
                 content: { format: "plain", value: text || " " },
                 author,
                 replyTo: request.key,
+                actions: commentActions,
                 ...likeCount !== void 0 ? { favouritesCount: likeCount } : {}
               }
             });
@@ -331,6 +351,115 @@
             endReached: !olderCursor,
             ...olderCursor ? { olderCursor } : {}
           };
+        },
+        async mutate(request, context) {
+          const credential = await readCredential();
+          const st = await getCsrfToken(context, credential.cookies);
+          const id = request.key.id.replace(/^comment-/, "");
+          if (request.action === "Favourite") {
+            await requestFormPost(
+              context.origin + "/api/attitudes/create",
+              { id, attitude: "heart", st },
+              context,
+              credential.cookies
+            );
+          } else if (request.action === "Unfavourite") {
+            await requestFormPost(
+              context.origin + "/api/attitudes/destroy",
+              { id, attitude: "heart", st },
+              context,
+              credential.cookies
+            );
+          } else if (request.action === "Repost") {
+            const content = request.parameters?.content || "\u8F6C\u53D1\u5FAE\u535A";
+            await requestFormPost(
+              context.origin + "/api/statuses/repost",
+              { mid: id, content, st },
+              context,
+              credential.cookies
+            );
+          }
+          if (!request.key.id.startsWith("comment-")) {
+            try {
+              const url = context.origin + "/statuses/show?id=" + encodeURIComponent(id);
+              const response = await requestJson(url, context, credential.cookies, {}, false, true);
+              if (response && isRecord(response.data)) {
+                const updated = mapTimelinePost(response.data, context);
+                if (updated) {
+                  return { type: "updatedPost", post: updated };
+                }
+              }
+            } catch {
+            }
+          }
+          return { type: "noChange" };
+        }
+      },
+      compose: {
+        async publish(request, context) {
+          const credential = await readCredential();
+          const st = await getCsrfToken(context, credential.cookies);
+          if (request.replyTo) {
+            const rawId = request.replyTo.id;
+            const isCommentReply = rawId.startsWith("comment-");
+            const targetId = rawId.replace(/^comment-/, "");
+            const formValues = {
+              mid: targetId,
+              content: request.text,
+              st
+            };
+            if (isCommentReply) {
+              formValues.cid = targetId;
+            }
+            const res = await requestFormPost(
+              context.origin + "/api/comments/create",
+              formValues,
+              context,
+              credential.cookies
+            );
+            if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
+              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u8BC4\u8BBA\u53D1\u5E03\u5931\u8D25\u3002";
+              fail("Remote", msg);
+            }
+            const commentData = res.data;
+            const commentId = String(commentData.idstr || commentData.id || await flare.crypto.uuid());
+            const userObj = isRecord(commentData.user) ? commentData.user : {};
+            const author = {
+              key: { id: String(userObj.id || credential.profile.key.id), host: accountHost(context) },
+              displayName: String(userObj.screen_name || credential.profile.displayName || "\u6211"),
+              handle: String(userObj.screen_name || credential.profile.handle || "me"),
+              avatarUrl: safeWeiboMediaUrl(userObj.profile_image_url || userObj.avatar_hd || credential.profile.avatarUrl)
+            };
+            const post = {
+              key: { id: "comment-" + commentId, host: accountHost(context) },
+              createdAt: parseWeiboDate(typeof commentData.created_at === "string" ? commentData.created_at : void 0),
+              content: { format: "plain", value: request.text },
+              author,
+              replyTo: request.replyTo
+            };
+            return { post };
+          } else {
+            const formValues = {
+              content: request.text,
+              st
+            };
+            const res = await requestFormPost(
+              context.origin + "/api/statuses/create",
+              formValues,
+              context,
+              credential.cookies
+            );
+            if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
+              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u5FAE\u535A\u53D1\u5E03\u5931\u8D25\u3002";
+              fail("Remote", msg);
+            }
+            const statusData = res.data;
+            const post = mapTimelinePost(statusData, context);
+            if (!post) {
+              fail("Remote", "\u65E0\u6CD5\u89E3\u6790\u65B0\u53D1\u5E03\u7684\u5FAE\u535A\u3002");
+            }
+            return { post };
+          }
         }
       },
       profile: {
@@ -536,6 +665,29 @@
     if (repliesCount !== void 0) post.repliesCount = repliesCount;
     if (repostsCount !== void 0) post.repostsCount = repostsCount;
     if (favouritesCount !== void 0) post.favouritesCount = favouritesCount;
+    const isLiked = value.favorited === true || typeof value.attitudes_status === "number" && value.attitudes_status > 0 || value.attitude_type === "heart" || value.liked === true;
+    const actions = [
+      {
+        action: "Reply",
+        label: "\u56DE\u590D",
+        enabled: true,
+        count: repliesCount
+      },
+      {
+        action: "Repost",
+        label: "\u8F6C\u53D1",
+        enabled: true,
+        count: repostsCount
+      },
+      {
+        action: isLiked ? "Unfavourite" : "Favourite",
+        label: isLiked ? "\u5DF2\u8D5E" : "\u8D5E",
+        enabled: true,
+        active: isLiked,
+        count: favouritesCount
+      }
+    ];
+    post.actions = actions;
     return post;
   }
   function mapTimelineProfile(user, context) {
@@ -738,6 +890,60 @@
       fail("InvalidResponse", "\u5FAE\u535A\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE\u6709\u6548 JSON\u3002");
     }
     return requiredObject(value);
+  }
+  async function getCsrfToken(context, cookies) {
+    const xsrfCookie = cookies.find((c) => c.name.toLowerCase() === "xsrf-token");
+    if (xsrfCookie && xsrfCookie.value) {
+      return xsrfCookie.value;
+    }
+    try {
+      const config = await requestJson(context.origin + API_CONFIG_PATH, context, cookies, {}, false, true);
+      if (config && isRecord(config.data) && typeof config.data.st === "string") {
+        return config.data.st;
+      }
+    } catch {
+    }
+    return "";
+  }
+  async function requestFormPost(url, formValues, context, cookies, extraHeaders = {}) {
+    if (!isSameOrigin(url, context.origin)) {
+      fail("Unsupported", "\u5FAE\u535A\u63A5\u53E3\u8DF3\u8F6C\u5230\u4E86\u6240\u9009\u8D26\u53F7\u7AD9\u70B9\u4E4B\u5916\uFF0C\u5DF2\u505C\u6B62\u8BF7\u6C42\u3002");
+    }
+    let response;
+    try {
+      response = await flare.http.request({
+        method: "POST",
+        url,
+        cookies,
+        headers: {
+          ...DEFAULT_HEADERS,
+          "Referer": context.origin + "/",
+          "X-Requested-With": "XMLHttpRequest",
+          ...extraHeaders
+        },
+        body: {
+          type: "form",
+          values: formValues
+        }
+      });
+    } catch (error) {
+      if (error && typeof error === "object" && "code" in error && error.code === "host.unavailable") {
+        fail("Network", "Flare \u65E0\u6CD5\u8FDE\u63A5\u5FAE\u535A\u63A5\u53E3\u3002");
+      }
+      throw error;
+    }
+    if (response.status === 401 || response.status === 403) {
+      fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\u3002");
+    }
+    if (response.status < 200 || response.status >= 300) {
+      fail("Remote", "\u5FAE\u535A\u63A5\u53E3\u8FD4\u56DE HTTP " + response.status + "\u3002");
+    }
+    try {
+      const value = JSON.parse(response.body);
+      return isRecord(value) ? value : null;
+    } catch {
+      return null;
+    }
   }
   async function readCredential() {
     const value = await flare.credential.read();

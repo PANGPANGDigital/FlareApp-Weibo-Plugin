@@ -94,8 +94,12 @@ defineFlareSocialPlugin({
 
   login: {
     browser: {
-      async begin(_request, context) {
-        return { type: "webCookie", startUrl: context.origin + "/" };
+      async begin(_request, _context) {
+        return {
+          type: "webCookie",
+          startUrl:
+            "https://passport.weibo.com/sso/signin?entry=wapsso&source=wapssowb&url=https%3A%2F%2Fm.weibo.cn%2F",
+        };
       },
       async check(request, context) {
         const probeUrl = context.origin + API_CONFIG_PATH;
@@ -193,7 +197,8 @@ defineFlareSocialPlugin({
             capabilities: {
               "flare.datasource.timeline/v1": ["page"],
               "flare.datasource.tab-catalog/v1": ["page"],
-              "flare.datasource.post/v1": ["detail", "context"],
+              "flare.datasource.post/v1": ["detail", "context", "mutate"],
+              "flare.datasource.compose/v1": ["publish"],
               "flare.datasource.profile/v1": ["byId", "byHandle"],
             },
           },
@@ -392,6 +397,22 @@ defineFlareSocialPlugin({
 
           const text = typeof c.text === "string" ? htmlToPlainText(c.text) : "";
           const likeCount = typeof c.like_count === "number" ? c.like_count : undefined;
+          const isCommentLiked = c.liked === true;
+
+          const commentActions: ActionDescriptorV1[] = [
+            {
+              action: "Reply",
+              label: "回复",
+              enabled: true,
+            },
+            {
+              action: isCommentLiked ? "Unfavourite" : "Favourite",
+              label: isCommentLiked ? "已赞" : "赞",
+              enabled: true,
+              active: isCommentLiked,
+              count: likeCount,
+            },
+          ];
 
           items.push({
             type: "post",
@@ -401,6 +422,7 @@ defineFlareSocialPlugin({
               content: { format: "plain", value: text || " " },
               author,
               replyTo: request.key,
+              actions: commentActions,
               ...(likeCount !== undefined ? { favouritesCount: likeCount } : {}),
             },
           });
@@ -419,6 +441,132 @@ defineFlareSocialPlugin({
           endReached: !olderCursor,
           ...(olderCursor ? { olderCursor } : {}),
         };
+      },
+
+      async mutate(request, context) {
+        const credential = await readCredential();
+        const st = await getCsrfToken(context, credential.cookies);
+        const id = request.key.id.replace(/^comment-/, "");
+
+        if (request.action === "Favourite") {
+          await requestFormPost(
+            context.origin + "/api/attitudes/create",
+            { id, attitude: "heart", st },
+            context,
+            credential.cookies,
+          );
+        } else if (request.action === "Unfavourite") {
+          await requestFormPost(
+            context.origin + "/api/attitudes/destroy",
+            { id, attitude: "heart", st },
+            context,
+            credential.cookies,
+          );
+        } else if (request.action === "Repost") {
+          const content = request.parameters?.content || "转发微博";
+          await requestFormPost(
+            context.origin + "/api/statuses/repost",
+            { mid: id, content, st },
+            context,
+            credential.cookies,
+          );
+        }
+
+        if (!request.key.id.startsWith("comment-")) {
+          try {
+            const url = context.origin + "/statuses/show?id=" + encodeURIComponent(id);
+            const response = await requestJson(url, context, credential.cookies, {}, false, true);
+            if (response && isRecord(response.data)) {
+              const updated = mapTimelinePost(response.data as Record<string, unknown>, context);
+              if (updated) {
+                return { type: "updatedPost", post: updated };
+              }
+            }
+          } catch {
+            // fallback
+          }
+        }
+
+        return { type: "noChange" };
+      },
+    },
+
+    compose: {
+      async publish(request, context) {
+        const credential = await readCredential();
+        const st = await getCsrfToken(context, credential.cookies);
+
+        if (request.replyTo) {
+          const rawId = request.replyTo.id;
+          const isCommentReply = rawId.startsWith("comment-");
+          const targetId = rawId.replace(/^comment-/, "");
+
+          const formValues: Record<string, string> = {
+            mid: targetId,
+            content: request.text,
+            st,
+          };
+          if (isCommentReply) {
+            formValues.cid = targetId;
+          }
+
+          const res = await requestFormPost(
+            context.origin + "/api/comments/create",
+            formValues,
+            context,
+            credential.cookies,
+          );
+
+          if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
+            const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "评论发布失败。";
+            fail("Remote", msg);
+          }
+
+          const commentData = res.data as Record<string, unknown>;
+          const commentId = String(commentData.idstr || commentData.id || (await flare.crypto.uuid()));
+          const userObj = isRecord(commentData.user) ? commentData.user : {};
+          const author: ProfileV1 = {
+            key: { id: String(userObj.id || credential.profile.key.id), host: accountHost(context) },
+            displayName: String(userObj.screen_name || credential.profile.displayName || "我"),
+            handle: String(userObj.screen_name || credential.profile.handle || "me"),
+            avatarUrl: safeWeiboMediaUrl(userObj.profile_image_url || userObj.avatar_hd || credential.profile.avatarUrl),
+          };
+
+          const post: PostV1 = {
+            key: { id: "comment-" + commentId, host: accountHost(context) },
+            createdAt: parseWeiboDate(typeof commentData.created_at === "string" ? commentData.created_at : undefined),
+            content: { format: "plain", value: request.text },
+            author,
+            replyTo: request.replyTo,
+          };
+
+          return { post };
+        } else {
+          const formValues: Record<string, string> = {
+            content: request.text,
+            st,
+          };
+
+          const res = await requestFormPost(
+            context.origin + "/api/statuses/create",
+            formValues,
+            context,
+            credential.cookies,
+          );
+
+          if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
+            const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "微博发布失败。";
+            fail("Remote", msg);
+          }
+
+          const statusData = res.data as Record<string, unknown>;
+          const post = mapTimelinePost(statusData, context);
+          if (!post) {
+            fail("Remote", "无法解析新发布的微博。");
+          }
+
+          return { post };
+        }
       },
     },
 
@@ -693,6 +841,35 @@ function mapTimelinePost(value: Record<string, unknown>, context: PluginInvocati
   if (repostsCount !== undefined) post.repostsCount = repostsCount;
   if (favouritesCount !== undefined) post.favouritesCount = favouritesCount;
 
+  const isLiked =
+    value.favorited === true ||
+    (typeof value.attitudes_status === "number" && value.attitudes_status > 0) ||
+    value.attitude_type === "heart" ||
+    value.liked === true;
+
+  const actions: ActionDescriptorV1[] = [
+    {
+      action: "Reply",
+      label: "回复",
+      enabled: true,
+      count: repliesCount,
+    },
+    {
+      action: "Repost",
+      label: "转发",
+      enabled: true,
+      count: repostsCount,
+    },
+    {
+      action: isLiked ? "Unfavourite" : "Favourite",
+      label: isLiked ? "已赞" : "赞",
+      enabled: true,
+      active: isLiked,
+      count: favouritesCount,
+    },
+  ];
+  post.actions = actions;
+
   return post;
 }
 
@@ -922,6 +1099,72 @@ async function requestJson(
     fail("InvalidResponse", "微博接口没有返回有效 JSON。");
   }
   return requiredObject(value);
+}
+
+async function getCsrfToken(context: PluginInvocationContextV1, cookies: CookiePair[]): Promise<string> {
+  const xsrfCookie = cookies.find((c) => c.name.toLowerCase() === "xsrf-token");
+  if (xsrfCookie && xsrfCookie.value) {
+    return xsrfCookie.value;
+  }
+  try {
+    const config = await requestJson(context.origin + API_CONFIG_PATH, context, cookies, {}, false, true);
+    if (config && isRecord(config.data) && typeof config.data.st === "string") {
+      return config.data.st;
+    }
+  } catch {
+    // fallback
+  }
+  return "";
+}
+
+async function requestFormPost(
+  url: string,
+  formValues: Record<string, string>,
+  context: PluginInvocationContextV1,
+  cookies: CookiePair[],
+  extraHeaders: Record<string, string> = {},
+): Promise<Record<string, unknown> | null> {
+  if (!isSameOrigin(url, context.origin)) {
+    fail("Unsupported", "微博接口跳转到了所选账号站点之外，已停止请求。");
+  }
+
+  let response: HttpResponseV1;
+  try {
+    response = await flare.http.request({
+      method: "POST",
+      url,
+      cookies,
+      headers: {
+        ...DEFAULT_HEADERS,
+        "Referer": context.origin + "/",
+        "X-Requested-With": "XMLHttpRequest",
+        ...extraHeaders,
+      },
+      body: {
+        type: "form",
+        values: formValues,
+      },
+    });
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "host.unavailable") {
+      fail("Network", "Flare 无法连接微博接口。");
+    }
+    throw error;
+  }
+
+  if (response.status === 401 || response.status === 403) {
+    fail("AuthenticationRequired", "微博登录状态已失效。");
+  }
+  if (response.status < 200 || response.status >= 300) {
+    fail("Remote", "微博接口返回 HTTP " + response.status + "。");
+  }
+
+  try {
+    const value = JSON.parse(response.body);
+    return isRecord(value) ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 async function readCredential(): Promise<StoredCredential> {
