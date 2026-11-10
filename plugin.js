@@ -510,32 +510,13 @@
               return { type: "noChange" };
             } else if (request.action === "Repost") {
               const content = request.parameters?.content || "\u8F6C\u53D1\u5FAE\u535A";
-              const res = await requestFormPost(
-                context.origin + "/api/statuses/repost",
-                { id: numericStatusId, mid: numericStatusId, content, st },
-                context,
-                credential.cookies
-              );
-              if (!res || !isOkResponse(res.ok)) {
-                const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u8F6C\u53D1\u5931\u8D25\u3002";
-                fail("Remote", msg);
-              }
+              await performRepostAction(numericStatusId, content, context, credential.cookies);
               return { type: "noChange" };
             } else if (request.action === "Bookmark") {
-              await requestFormPost(
-                context.origin + "/api/statuses/createfav",
-                { id: numericStatusId, st },
-                context,
-                credential.cookies
-              );
+              await performBookmarkAction(numericStatusId, false, context, credential.cookies);
               return { type: "noChange" };
             } else if (request.action === "Unbookmark") {
-              await requestFormPost(
-                context.origin + "/api/statuses/destroyfav",
-                { id: numericStatusId, st },
-                context,
-                credential.cookies
-              );
+              await performBookmarkAction(numericStatusId, true, context, credential.cookies);
               return { type: "noChange" };
             } else if (request.action === "Delete") {
               await requestFormPost(
@@ -594,11 +575,12 @@
                 commentId = rawId.replace(/^comment[-_]/, "");
                 statusId = commentId;
               }
+              const numericStatusId = /^\d+$/.test(statusId) ? statusId : bidToMid(statusId) || statusId;
               const res = await requestFormPost(
                 context.origin + "/api/comments/reply",
                 {
-                  id: statusId,
-                  mid: statusId,
+                  id: numericStatusId,
+                  mid: numericStatusId,
                   cid: commentId,
                   reply: commentId,
                   content: request.text,
@@ -606,7 +588,7 @@
                 },
                 context,
                 credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                { Referer: context.origin + "/" }
               );
               if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
                 const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u56DE\u590D\u53D1\u5E03\u5931\u8D25\u3002";
@@ -627,17 +609,18 @@
               return { post };
             } else {
               const statusId = rawId;
+              const numericStatusId = /^\d+$/.test(statusId) ? statusId : bidToMid(statusId) || statusId;
               const res = await requestFormPost(
                 context.origin + "/api/comments/create",
                 {
-                  id: statusId,
-                  mid: statusId,
+                  id: numericStatusId,
+                  mid: numericStatusId,
                   content: request.text,
                   st
                 },
                 context,
                 credential.cookies,
-                { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
+                { Referer: context.origin + "/" }
               );
               if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
                 const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "\u8BC4\u8BBA\u53D1\u5E03\u5931\u8D25\u3002";
@@ -1149,6 +1132,7 @@
     const isLiked = Boolean(
       value.liked === true || typeof value.attitudes_status === "number" && value.attitudes_status > 0 || value.attitude_type === "heart"
     );
+    const isFavorited = value.favorited === true;
     const visible = isRecord(value.visible) ? value.visible : void 0;
     const canReblog = !visible || visible.type === void 0 || visible.type === 0 || visible.type === "0";
     const actions = [
@@ -1172,6 +1156,12 @@
         enabled: true,
         active: isLiked,
         count: favouritesCount
+      },
+      {
+        action: isFavorited ? "Unbookmark" : "Bookmark",
+        label: isFavorited ? "\u5DF2\u6536\u85CF" : "\u6536\u85CF",
+        enabled: true,
+        active: isFavorited
       },
       ...isFromMe ? [
         {
@@ -1743,6 +1733,80 @@
       return;
     }
     fail("Remote", msg || (isUnlike ? "\u53D6\u6D88\u70B9\u8D5E\u5931\u8D25\u3002" : "\u70B9\u8D5E\u5931\u8D25\u3002"));
+  }
+  async function performRepostAction(numericStatusId, content, context, cookies) {
+    let st = await getCsrfToken(context, cookies);
+    if (!st) {
+      fail("AuthenticationRequired", "\u65E0\u6CD5\u83B7\u53D6\u5FAE\u535A\u5B89\u5168\u51ED\u8BC1 (st)\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
+    }
+    const form = {
+      id: numericStatusId,
+      mid: numericStatusId,
+      content: content || "\u8F6C\u53D1\u5FAE\u535A",
+      st
+    };
+    let res = await requestFormPost(context.origin + "/api/statuses/repost", form, context, cookies, {}, true);
+    if (res && res.ok !== 1) {
+      const msg2 = typeof res.msg === "string" ? res.msg : "";
+      const isStError = msg2.includes("st") || msg2.includes("token") || msg2.includes("\u767B\u5F55") || res.ok === -100 || res.ok === 0 && !msg2;
+      if (isStError) {
+        cachedSt = null;
+        const freshSt = await getCsrfToken(context, cookies);
+        if (freshSt && freshSt !== st) {
+          form.st = freshSt;
+          res = await requestFormPost(context.origin + "/api/statuses/repost", form, context, cookies, {}, true);
+        }
+      }
+    }
+    if (!res) {
+      fail("Remote", "\u8F6C\u53D1\u5931\u8D25\u3002");
+    }
+    if (isOkResponse(res.ok)) {
+      return;
+    }
+    const msg = typeof res.msg === "string" ? res.msg : "";
+    if (msg.includes("\u5DF2\u7ECF\u8F6C\u53D1") || msg.includes("\u5DF2\u8F6C\u53D1") || msg.includes("\u91CD\u590D")) {
+      return;
+    }
+    fail("Remote", msg || "\u8F6C\u53D1\u5931\u8D25\u3002");
+  }
+  async function performBookmarkAction(numericStatusId, isUnbookmark, context, cookies) {
+    let st = await getCsrfToken(context, cookies);
+    if (!st) {
+      fail("AuthenticationRequired", "\u65E0\u6CD5\u83B7\u53D6\u5FAE\u535A\u5B89\u5168\u51ED\u8BC1 (st)\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
+    }
+    const url = isUnbookmark ? context.origin + "/api/statuses/destroyfav" : context.origin + "/api/statuses/createfav";
+    const form = {
+      id: numericStatusId,
+      st
+    };
+    let res = await requestFormPost(url, form, context, cookies, {}, true);
+    if (res && res.ok !== 1) {
+      const msg2 = typeof res.msg === "string" ? res.msg : "";
+      const isStError = msg2.includes("st") || msg2.includes("token") || msg2.includes("\u767B\u5F55") || res.ok === -100 || res.ok === 0 && !msg2;
+      if (isStError) {
+        cachedSt = null;
+        const freshSt = await getCsrfToken(context, cookies);
+        if (freshSt && freshSt !== st) {
+          form.st = freshSt;
+          res = await requestFormPost(url, form, context, cookies, {}, true);
+        }
+      }
+    }
+    if (!res) {
+      fail("Remote", isUnbookmark ? "\u53D6\u6D88\u6536\u85CF\u5931\u8D25\u3002" : "\u6536\u85CF\u5931\u8D25\u3002");
+    }
+    if (isOkResponse(res.ok)) {
+      return;
+    }
+    const msg = typeof res.msg === "string" ? res.msg : "";
+    if (!isUnbookmark && (msg.includes("\u5DF2\u6536\u85CF") || msg.includes("\u5DF2\u7ECF\u6536\u85CF") || msg.includes("exist"))) {
+      return;
+    }
+    if (isUnbookmark && (msg.includes("\u672A\u6536\u85CF") || msg.includes("\u4E0D\u5B58\u5728"))) {
+      return;
+    }
+    fail("Remote", msg || (isUnbookmark ? "\u53D6\u6D88\u6536\u85CF\u5931\u8D25\u3002" : "\u6536\u85CF\u5931\u8D25\u3002"));
   }
   async function readCredential() {
     const value = await flare.credential.read();

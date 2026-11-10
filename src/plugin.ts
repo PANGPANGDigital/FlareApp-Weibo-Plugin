@@ -620,32 +620,13 @@ defineFlareSocialPlugin({
             return { type: "noChange" };
           } else if (request.action === "Repost") {
             const content = request.parameters?.content || "转发微博";
-            const res = await requestFormPost(
-              context.origin + "/api/statuses/repost",
-              { id: numericStatusId, mid: numericStatusId, content, st },
-              context,
-              credential.cookies,
-            );
-            if (!res || !isOkResponse(res.ok)) {
-              const msg = isRecord(res) && typeof res.msg === "string" ? res.msg : "转发失败。";
-              fail("Remote", msg);
-            }
+            await performRepostAction(numericStatusId, content, context, credential.cookies);
             return { type: "noChange" };
           } else if (request.action === "Bookmark") {
-            await requestFormPost(
-              context.origin + "/api/statuses/createfav",
-              { id: numericStatusId, st },
-              context,
-              credential.cookies,
-            );
+            await performBookmarkAction(numericStatusId, false, context, credential.cookies);
             return { type: "noChange" };
           } else if (request.action === "Unbookmark") {
-            await requestFormPost(
-              context.origin + "/api/statuses/destroyfav",
-              { id: numericStatusId, st },
-              context,
-              credential.cookies,
-            );
+            await performBookmarkAction(numericStatusId, true, context, credential.cookies);
             return { type: "noChange" };
           } else if (request.action === "Delete") {
             await requestFormPost(
@@ -710,11 +691,13 @@ defineFlareSocialPlugin({
               statusId = commentId;
             }
 
+            const numericStatusId = /^\d+$/.test(statusId) ? statusId : (bidToMid(statusId) || statusId);
+
             const res = await requestFormPost(
               context.origin + "/api/comments/reply",
               {
-                id: statusId,
-                mid: statusId,
+                id: numericStatusId,
+                mid: numericStatusId,
                 cid: commentId,
                 reply: commentId,
                 content: request.text,
@@ -722,7 +705,7 @@ defineFlareSocialPlugin({
               },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
+              { Referer: context.origin + "/" },
             );
 
             if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
@@ -747,17 +730,18 @@ defineFlareSocialPlugin({
           } else {
             // Commenting on a status
             const statusId = rawId;
+            const numericStatusId = /^\d+$/.test(statusId) ? statusId : (bidToMid(statusId) || statusId);
             const res = await requestFormPost(
               context.origin + "/api/comments/create",
               {
-                id: statusId,
-                mid: statusId,
+                id: numericStatusId,
+                mid: numericStatusId,
                 content: request.text,
                 st,
               },
               context,
               credential.cookies,
-              { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
+              { Referer: context.origin + "/" },
             );
 
             if (!res || !isOkResponse(res.ok) || !isRecord(res.data)) {
@@ -1423,6 +1407,7 @@ function mapTimelinePost(
     (typeof value.attitudes_status === "number" && value.attitudes_status > 0) ||
     value.attitude_type === "heart"
   );
+  const isFavorited = value.favorited === true;
 
   const visible = isRecord(value.visible) ? (value.visible as Record<string, unknown>) : undefined;
   const canReblog = !visible || visible.type === undefined || visible.type === 0 || visible.type === "0";
@@ -1450,6 +1435,12 @@ function mapTimelinePost(
       enabled: true,
       active: isLiked,
       count: favouritesCount,
+    },
+    {
+      action: isFavorited ? ("Unbookmark" as const) : ("Bookmark" as const),
+      label: isFavorited ? "已收藏" : "收藏",
+      enabled: true,
+      active: isFavorited,
     },
     ...(isFromMe
       ? [
@@ -2168,6 +2159,119 @@ async function performLikeAction(
   }
 
   fail("Remote", msg || (isUnlike ? "取消点赞失败。" : "点赞失败。"));
+}
+
+async function performRepostAction(
+  numericStatusId: string,
+  content: string,
+  context: PluginInvocationContextV1,
+  cookies: CookiePair[],
+): Promise<void> {
+  let st = await getCsrfToken(context, cookies);
+  if (!st) {
+    fail("AuthenticationRequired", "无法获取微博安全凭证 (st)，请重新登录。");
+  }
+
+  const form: Record<string, string> = {
+    id: numericStatusId,
+    mid: numericStatusId,
+    content: content || "转发微博",
+    st,
+  };
+
+  let res = await requestFormPost(context.origin + "/api/statuses/repost", form, context, cookies, {}, true);
+
+  if (res && res.ok !== 1) {
+    const msg = typeof res.msg === "string" ? res.msg : "";
+    const isStError =
+      msg.includes("st") ||
+      msg.includes("token") ||
+      msg.includes("登录") ||
+      res.ok === -100 ||
+      (res.ok === 0 && !msg);
+    if (isStError) {
+      cachedSt = null;
+      const freshSt = await getCsrfToken(context, cookies);
+      if (freshSt && freshSt !== st) {
+        form.st = freshSt;
+        res = await requestFormPost(context.origin + "/api/statuses/repost", form, context, cookies, {}, true);
+      }
+    }
+  }
+
+  if (!res) {
+    fail("Remote", "转发失败。");
+  }
+
+  if (isOkResponse(res.ok)) {
+    return;
+  }
+
+  const msg = typeof res.msg === "string" ? res.msg : "";
+  if (msg.includes("已经转发") || msg.includes("已转发") || msg.includes("重复")) {
+    return;
+  }
+
+  fail("Remote", msg || "转发失败。");
+}
+
+async function performBookmarkAction(
+  numericStatusId: string,
+  isUnbookmark: boolean,
+  context: PluginInvocationContextV1,
+  cookies: CookiePair[],
+): Promise<void> {
+  let st = await getCsrfToken(context, cookies);
+  if (!st) {
+    fail("AuthenticationRequired", "无法获取微博安全凭证 (st)，请重新登录。");
+  }
+
+  const url = isUnbookmark
+    ? context.origin + "/api/statuses/destroyfav"
+    : context.origin + "/api/statuses/createfav";
+
+  const form: Record<string, string> = {
+    id: numericStatusId,
+    st,
+  };
+
+  let res = await requestFormPost(url, form, context, cookies, {}, true);
+
+  if (res && res.ok !== 1) {
+    const msg = typeof res.msg === "string" ? res.msg : "";
+    const isStError =
+      msg.includes("st") ||
+      msg.includes("token") ||
+      msg.includes("登录") ||
+      res.ok === -100 ||
+      (res.ok === 0 && !msg);
+    if (isStError) {
+      cachedSt = null;
+      const freshSt = await getCsrfToken(context, cookies);
+      if (freshSt && freshSt !== st) {
+        form.st = freshSt;
+        res = await requestFormPost(url, form, context, cookies, {}, true);
+      }
+    }
+  }
+
+  if (!res) {
+    fail("Remote", isUnbookmark ? "取消收藏失败。" : "收藏失败。");
+  }
+
+  if (isOkResponse(res.ok)) {
+    return;
+  }
+
+  const msg = typeof res.msg === "string" ? res.msg : "";
+  if (!isUnbookmark && (msg.includes("已收藏") || msg.includes("已经收藏") || msg.includes("exist"))) {
+    return;
+  }
+  if (isUnbookmark && (msg.includes("未收藏") || msg.includes("不存在"))) {
+    return;
+  }
+
+  fail("Remote", msg || (isUnbookmark ? "取消收藏失败。" : "收藏失败。"));
 }
 
 async function readCredential(): Promise<StoredCredential> {
