@@ -13,8 +13,13 @@ type TopicResult = {
 };
 
 const API_CONFIG_PATH = "/api/config";
+const API_CONFIG_LIST_PATH = "/api/config/list";
 const PROFILE_PATH = "/profile/info";
-const FRIENDS_TIMELINE_PATH = "/feed/friends";
+const TIMELINE_FRIENDS_PATH = "/feed/friends";
+const TIMELINE_CIRCLE_PATH = "/feed/circle";
+const TIMELINE_PRIVATE_PATH = "/feed/private";
+const TIMELINE_GROUP_PATH = "/feed/group";
+const FRIENDS_TIMELINE_PATH = TIMELINE_FRIENDS_PATH;
 const TOPICS_PATH = "/api/container/getIndex?containerid=100803_-_followsuper";
 const TOPICS_FALLBACK_PATH = "/api/container/getIndex?containerid=100803_-_page_my_follow_super";
 const MAX_TOPIC_PAGES = 30;
@@ -280,11 +285,23 @@ defineFlareSocialPlugin({
         }
 
         // Determine feed endpoint based on timelineId
-        let feedEndpoint = FRIENDS_TIMELINE_PATH;
-        if (timelineId === "special") {
-          feedEndpoint = "/feed/group?gid=1000";
+        let feedEndpoint = TIMELINE_FRIENDS_PATH;
+        if (timelineId === "friends") {
+          feedEndpoint = TIMELINE_CIRCLE_PATH;
+        } else if (timelineId === "private") {
+          feedEndpoint = TIMELINE_PRIVATE_PATH;
+        } else if (timelineId === "special") {
+          const groups = await fetchUserGroups(context, credential.cookies);
+          const specialGroup = groups.find((g) => g.name === "特别关注" || g.name.includes("特别关注"));
+          if (specialGroup) {
+            feedEndpoint = `${TIMELINE_GROUP_PATH}?gid=${encodeURIComponent(specialGroup.gid)}`;
+          } else if (groups.length > 0) {
+            feedEndpoint = `${TIMELINE_GROUP_PATH}?gid=${encodeURIComponent(groups[0].gid)}`;
+          } else {
+            feedEndpoint = TIMELINE_CIRCLE_PATH;
+          }
         } else if (timelineId.startsWith("group:")) {
-          feedEndpoint = "/feed/group?gid=" + encodeURIComponent(timelineId.slice("group:".length));
+          feedEndpoint = `${TIMELINE_GROUP_PATH}?gid=${encodeURIComponent(timelineId.slice("group:".length))}`;
         }
 
         const cursor = request.page.direction === "older" ? request.page.cursor : undefined;
@@ -305,18 +322,54 @@ defineFlareSocialPlugin({
     },
 
     tabCatalog: {
-      async page(_request, _context) {
+      async page(_request, context) {
+        let dynamicGroups: WeiboGroupInfo[] = [];
+        try {
+          const credential = await readCredential();
+          dynamicGroups = await fetchUserGroups(context, credential.cookies);
+        } catch {
+          // guest or unauthenticated
+        }
+
+        const timelineItems: TimelineDescriptorV1[] = [
+          { id: "checkin", title: { value: "最新微博Enhance" }, icon: "Home" },
+          { id: "friends", title: { value: "好友圈" }, icon: "Follow" },
+          { id: "private", title: { value: "悄悄关注" }, icon: "Bookmark" },
+        ];
+
+        let hasSpecial = false;
+        for (const g of dynamicGroups) {
+          if (g.name === "特别关注" || g.name.includes("特别关注")) {
+            hasSpecial = true;
+            timelineItems.push({
+              id: "special",
+              title: { value: g.name },
+              icon: "Featured",
+            });
+          } else {
+            timelineItems.push({
+              id: "group:" + g.gid,
+              title: { value: g.name },
+              icon: "List",
+            });
+          }
+        }
+
+        if (!hasSpecial) {
+          timelineItems.push({
+            id: "special",
+            title: { value: "特别关注" },
+            icon: "Featured",
+          });
+        }
+
         return {
           items: [
             {
               id: "weibo_groups",
               title: { value: "微博分组" },
               timelines: {
-                items: [
-                  { id: "checkin", title: { value: "最新微博Enhance" }, icon: "Home" },
-                  { id: "friends", title: { value: "好友圈" }, icon: "Heart" },
-                  { id: "special", title: { value: "特别关注" }, icon: "Featured" },
-                ],
+                items: timelineItems,
                 endReached: true,
               },
             },
@@ -763,6 +816,45 @@ async function checkInTopic(
   }
 }
 
+interface WeiboGroupInfo {
+  gid: string;
+  name: string;
+}
+
+let cachedGroups: { time: number; groups: WeiboGroupInfo[] } | null = null;
+
+async function fetchUserGroups(
+  context: PluginInvocationContextV1,
+  cookies: CookiePair[],
+  forceRefresh = false,
+): Promise<WeiboGroupInfo[]> {
+  const now = Date.now();
+  if (!forceRefresh && cachedGroups && now - cachedGroups.time < 60_000) {
+    return cachedGroups.groups;
+  }
+  try {
+    const url = context.origin + API_CONFIG_LIST_PATH;
+    const res = await requestJson(url, context, cookies, {}, false, true);
+    if (res && isOkResponse(res.ok) && isRecord(res.data) && Array.isArray(res.data.groups)) {
+      const groups: WeiboGroupInfo[] = [];
+      for (const item of res.data.groups) {
+        if (isRecord(item)) {
+          const gid = optionalScalarText(item.gid);
+          const name = optionalScalarText(item.name);
+          if (gid && name) {
+            groups.push({ gid, name });
+          }
+        }
+      }
+      cachedGroups = { time: now, groups };
+      return groups;
+    }
+  } catch {
+    // non-fatal
+  }
+  return cachedGroups ? cachedGroups.groups : [];
+}
+
 async function fetchTimelineFeed(
   path: string,
   context: PluginInvocationContextV1,
@@ -785,19 +877,43 @@ async function fetchTimelineFeed(
   }
 
   const data = isRecord(response.data) ? response.data : {};
-  if (!Array.isArray(data.statuses)) {
-    return { items: [] };
+  let rawStatuses: unknown[] = [];
+  if (Array.isArray(data.statuses)) {
+    rawStatuses = data.statuses;
+  } else if (Array.isArray(data.cards)) {
+    for (const card of data.cards) {
+      if (isRecord(card)) {
+        if (isRecord(card.mblog)) {
+          rawStatuses.push(card.mblog);
+        } else if (Array.isArray(card.card_group)) {
+          for (const subCard of card.card_group) {
+            if (isRecord(subCard) && isRecord(subCard.mblog)) {
+              rawStatuses.push(subCard.mblog);
+            }
+          }
+        }
+      }
+    }
   }
 
-  const items = data.statuses
+  const items = rawStatuses
     .map((status) => mapTimelineStatus(status, context))
     .filter((item): item is TimelineItemV1 => item !== undefined);
-  const rawCursor = data.max_id_str ?? data.max_id ?? data.next_cursor_str ?? data.next_cursor ?? data.since_id_str ?? data.since_id;
-  const olderCursor = optionalScalarText(rawCursor);
+  const rawCursor =
+    data.max_id_str ??
+    data.max_id ??
+    data.next_cursor_str ??
+    data.next_cursor ??
+    data.since_id_str ??
+    data.since_id;
+  let olderCursor = optionalScalarText(rawCursor);
+  if (olderCursor === "0" || olderCursor === "0.0") {
+    olderCursor = undefined;
+  }
 
   return {
     items,
-    ...(olderCursor && olderCursor !== cursor ? { olderCursor } : {}),
+    ...(olderCursor && olderCursor !== cursor && items.length > 0 ? { olderCursor } : {}),
   };
 }
 

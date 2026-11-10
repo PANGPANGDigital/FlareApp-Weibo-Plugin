@@ -2,7 +2,11 @@
 (() => {
   // src/plugin.ts
   var API_CONFIG_PATH = "/api/config";
-  var FRIENDS_TIMELINE_PATH = "/feed/friends";
+  var API_CONFIG_LIST_PATH = "/api/config/list";
+  var TIMELINE_FRIENDS_PATH = "/feed/friends";
+  var TIMELINE_CIRCLE_PATH = "/feed/circle";
+  var TIMELINE_PRIVATE_PATH = "/feed/private";
+  var TIMELINE_GROUP_PATH = "/feed/group";
   var TOPICS_PATH = "/api/container/getIndex?containerid=100803_-_followsuper";
   var TOPICS_FALLBACK_PATH = "/api/container/getIndex?containerid=100803_-_page_my_follow_super";
   var MAX_TOPIC_PAGES = 30;
@@ -220,11 +224,23 @@
             }
             items.push(await makeSummaryPost(results, truncated, credential.profile, context));
           }
-          let feedEndpoint = FRIENDS_TIMELINE_PATH;
-          if (timelineId === "special") {
-            feedEndpoint = "/feed/group?gid=1000";
+          let feedEndpoint = TIMELINE_FRIENDS_PATH;
+          if (timelineId === "friends") {
+            feedEndpoint = TIMELINE_CIRCLE_PATH;
+          } else if (timelineId === "private") {
+            feedEndpoint = TIMELINE_PRIVATE_PATH;
+          } else if (timelineId === "special") {
+            const groups = await fetchUserGroups(context, credential.cookies);
+            const specialGroup = groups.find((g) => g.name === "\u7279\u522B\u5173\u6CE8" || g.name.includes("\u7279\u522B\u5173\u6CE8"));
+            if (specialGroup) {
+              feedEndpoint = `${TIMELINE_GROUP_PATH}?gid=${encodeURIComponent(specialGroup.gid)}`;
+            } else if (groups.length > 0) {
+              feedEndpoint = `${TIMELINE_GROUP_PATH}?gid=${encodeURIComponent(groups[0].gid)}`;
+            } else {
+              feedEndpoint = TIMELINE_CIRCLE_PATH;
+            }
           } else if (timelineId.startsWith("group:")) {
-            feedEndpoint = "/feed/group?gid=" + encodeURIComponent(timelineId.slice("group:".length));
+            feedEndpoint = `${TIMELINE_GROUP_PATH}?gid=${encodeURIComponent(timelineId.slice("group:".length))}`;
           }
           const cursor = request.page.direction === "older" ? request.page.cursor : void 0;
           const feedPage = await fetchTimelineFeed(
@@ -242,18 +258,49 @@
         }
       },
       tabCatalog: {
-        async page(_request, _context) {
+        async page(_request, context) {
+          let dynamicGroups = [];
+          try {
+            const credential = await readCredential();
+            dynamicGroups = await fetchUserGroups(context, credential.cookies);
+          } catch {
+          }
+          const timelineItems = [
+            { id: "checkin", title: { value: "\u6700\u65B0\u5FAE\u535AEnhance" }, icon: "Home" },
+            { id: "friends", title: { value: "\u597D\u53CB\u5708" }, icon: "Follow" },
+            { id: "private", title: { value: "\u6084\u6084\u5173\u6CE8" }, icon: "Bookmark" }
+          ];
+          let hasSpecial = false;
+          for (const g of dynamicGroups) {
+            if (g.name === "\u7279\u522B\u5173\u6CE8" || g.name.includes("\u7279\u522B\u5173\u6CE8")) {
+              hasSpecial = true;
+              timelineItems.push({
+                id: "special",
+                title: { value: g.name },
+                icon: "Featured"
+              });
+            } else {
+              timelineItems.push({
+                id: "group:" + g.gid,
+                title: { value: g.name },
+                icon: "List"
+              });
+            }
+          }
+          if (!hasSpecial) {
+            timelineItems.push({
+              id: "special",
+              title: { value: "\u7279\u522B\u5173\u6CE8" },
+              icon: "Featured"
+            });
+          }
           return {
             items: [
               {
                 id: "weibo_groups",
                 title: { value: "\u5FAE\u535A\u5206\u7EC4" },
                 timelines: {
-                  items: [
-                    { id: "checkin", title: { value: "\u6700\u65B0\u5FAE\u535AEnhance" }, icon: "Home" },
-                    { id: "friends", title: { value: "\u597D\u53CB\u5708" }, icon: "Heart" },
-                    { id: "special", title: { value: "\u7279\u522B\u5173\u6CE8" }, icon: "Featured" }
-                  ],
+                  items: timelineItems,
                   endReached: true
                 }
               }
@@ -606,6 +653,33 @@
       return { name: topic.name, status: "failed", message: "\u7B7E\u5230\u8BF7\u6C42\u5931\u8D25\u6216\u88AB\u98CE\u63A7\u3002" };
     }
   }
+  var cachedGroups = null;
+  async function fetchUserGroups(context, cookies, forceRefresh = false) {
+    const now = Date.now();
+    if (!forceRefresh && cachedGroups && now - cachedGroups.time < 6e4) {
+      return cachedGroups.groups;
+    }
+    try {
+      const url = context.origin + API_CONFIG_LIST_PATH;
+      const res = await requestJson(url, context, cookies, {}, false, true);
+      if (res && isOkResponse(res.ok) && isRecord(res.data) && Array.isArray(res.data.groups)) {
+        const groups = [];
+        for (const item of res.data.groups) {
+          if (isRecord(item)) {
+            const gid = optionalScalarText(item.gid);
+            const name = optionalScalarText(item.name);
+            if (gid && name) {
+              groups.push({ gid, name });
+            }
+          }
+        }
+        cachedGroups = { time: now, groups };
+        return groups;
+      }
+    } catch {
+    }
+    return cachedGroups ? cachedGroups.groups : [];
+  }
   async function fetchTimelineFeed(path, context, cookies, cursor) {
     let url = context.origin + path;
     if (cursor) {
@@ -622,15 +696,33 @@
       return { items: [] };
     }
     const data = isRecord(response.data) ? response.data : {};
-    if (!Array.isArray(data.statuses)) {
-      return { items: [] };
+    let rawStatuses = [];
+    if (Array.isArray(data.statuses)) {
+      rawStatuses = data.statuses;
+    } else if (Array.isArray(data.cards)) {
+      for (const card of data.cards) {
+        if (isRecord(card)) {
+          if (isRecord(card.mblog)) {
+            rawStatuses.push(card.mblog);
+          } else if (Array.isArray(card.card_group)) {
+            for (const subCard of card.card_group) {
+              if (isRecord(subCard) && isRecord(subCard.mblog)) {
+                rawStatuses.push(subCard.mblog);
+              }
+            }
+          }
+        }
+      }
     }
-    const items = data.statuses.map((status) => mapTimelineStatus(status, context)).filter((item) => item !== void 0);
+    const items = rawStatuses.map((status) => mapTimelineStatus(status, context)).filter((item) => item !== void 0);
     const rawCursor = data.max_id_str ?? data.max_id ?? data.next_cursor_str ?? data.next_cursor ?? data.since_id_str ?? data.since_id;
-    const olderCursor = optionalScalarText(rawCursor);
+    let olderCursor = optionalScalarText(rawCursor);
+    if (olderCursor === "0" || olderCursor === "0.0") {
+      olderCursor = void 0;
+    }
     return {
       items,
-      ...olderCursor && olderCursor !== cursor ? { olderCursor } : {}
+      ...olderCursor && olderCursor !== cursor && items.length > 0 ? { olderCursor } : {}
     };
   }
   function mapTimelineStatus(value, context) {
