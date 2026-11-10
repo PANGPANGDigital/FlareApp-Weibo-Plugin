@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "apiVersion": 1,
   "id": "local.plugin.p1568372ac69c4df8a99cff8ad3f57936",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "name": "Weibo.Plugin",
   "description": "微博最新时间线；刷新时检查关注的超话并只为尚未签到的超话提交签到。",
   "permissions": {

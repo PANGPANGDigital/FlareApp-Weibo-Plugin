@@ -116,7 +116,11 @@ defineFlareSocialPlugin({
         const credential = await readCredential();
         const items: TimelineItemV1[] = [];
 
-        if (request.page.direction === "refresh") {
+        const isTopOrRefresh =
+          request.page.direction === "refresh" ||
+          !request.page.cursor;
+
+        if (isTopOrRefresh) {
           const results: TopicResult[] = [];
           let truncated = false;
 
@@ -130,14 +134,18 @@ defineFlareSocialPlugin({
             }
           } catch (error) {
             if (isAuthenticationError(error)) throw error;
+            const errorMsg =
+              error && typeof error === "object" && "message" in error
+                ? String((error as any).message?.value || (error as any).message)
+                : "";
             results.push({
               name: "超话列表",
               status: "failed",
-              message: "读取签到状态失败；未提交签到，请稍后刷新重试。",
+              message: errorMsg || "读取签到状态失败；未提交签到，请稍后刷新重试。",
             });
           }
 
-          items.push(await makeSummaryItem(results, truncated, credential.profile, context));
+          items.push(await makeSummaryPost(results, truncated, credential.profile, context));
         }
 
         const feedPage = await fetchFriendsTimeline(
@@ -178,7 +186,7 @@ async function fetchFollowedTopics(
     const url = context.origin + TOPICS_PATH +
       (sinceId ? "&since_id=" + encodeURIComponent(sinceId) : "");
     const response = await requestJson(url, context, cookies, {}, false, true);
-    if (!response || !isOkResponse(response.ok)) {
+    if (!response || !isOkResponse(response.ok) || !hasCards(response)) {
       if (page === 0) {
         const fallbackUrl = context.origin + TOPICS_FALLBACK_PATH;
         const fallbackResp = await requestJson(fallbackUrl, context, cookies, {}, false, true);
@@ -202,6 +210,11 @@ async function fetchFollowedTopics(
   return { results, toCheck, xsrfToken, truncated };
 }
 
+function hasCards(response: Record<string, unknown>): boolean {
+  const data = isRecord(response.data) ? response.data : {};
+  return Array.isArray(data.cards) && data.cards.length > 0;
+}
+
 function parseTopicCards(
   response: Record<string, unknown>,
   seen: Set<string>,
@@ -218,12 +231,17 @@ function parseTopicCards(
     const entries = Array.isArray(cardValue.card_group) ? cardValue.card_group : [cardValue];
     for (const entryValue of entries) {
       if (!isRecord(entryValue)) continue;
-      const name = typeof entryValue.title_sub === "string" ? entryValue.title_sub.trim() : "";
+      const name =
+        (typeof entryValue.title_sub === "string" && entryValue.title_sub.trim()) ||
+        (typeof entryValue.title === "string" && entryValue.title.trim()) ||
+        (typeof entryValue.card_title === "string" && entryValue.card_title.trim()) ||
+        (typeof entryValue.desc1 === "string" && entryValue.desc1.trim()) ||
+        "";
       if (!name) continue;
 
       const button = Array.isArray(entryValue.buttons) && entryValue.buttons.length
         ? (isRecord(entryValue.buttons[0]) ? entryValue.buttons[0] : {})
-        : {};
+        : (isRecord(entryValue.button) ? entryValue.button : {});
       const buttonName = typeof button.name === "string" ? button.name : "";
       const scheme = typeof button.scheme === "string" ? button.scheme : (typeof entryValue.scheme === "string" ? entryValue.scheme : "");
 
@@ -529,7 +547,7 @@ function decodeHtmlEntities(value: string): string {
   });
 }
 
-async function makeSummaryItem(
+async function makeSummaryPost(
   results: TopicResult[],
   truncated: boolean,
   profile: ProfileV1,
@@ -546,29 +564,34 @@ async function makeSummaryItem(
 
   const lines = [
     `【超话签到通知 · ${timeStr}】`,
-    `发现 ${checked} 个超话：已签 ${already} 个，本次成功 ${success} 个，失败 ${failed} 个。`,
+    `关注超话：共 ${checked} 个（已签 ${already}，本次成功 ${success}，失败 ${failed}）`,
   ];
-  if (unknown) lines.push(`${unknown} 个超话暂未提供有效签到入口，已跳过。`);
-  if (truncated) lines.push(`超话列表已达 ${MAX_TOPIC_PAGES} 页限制，未继续检测后续页面。`);
+  if (unknown > 0) lines.push(`ℹ️ 另有 ${unknown} 个超话未识别到签到入口。`);
+  if (truncated) lines.push(`⚠️ 超话列表已达 ${MAX_TOPIC_PAGES} 页限制。`);
 
   const successes = results.filter((item) => item.status === "success").slice(0, 5);
   if (successes.length) {
-    lines.push("本次成功：" + successes.map((item) => item.name).join("、"));
+    lines.push("✅ 本次签到成功：" + successes.map((item) => item.name).join("、"));
   }
 
   const failures = results.filter((item) => item.status === "failed").slice(0, MAX_FAILURE_DETAILS);
   if (failures.length) {
-    lines.push("失败项：" + failures.map((item) => `${item.name}（${item.message || "请求失败"}）`).join("；"));
+    lines.push("❌ 签到失败：" + failures.map((item) => `${item.name}（${item.message || "请求失败"}）`).join("；"));
+  }
+
+  if (checked === 0) {
+    lines.push("（未扫描到关注的超话，请确认微博账号已关注超话）");
   }
 
   return {
-    type: "message",
-    message: {
-      key: { id: "checkin-" + await flare.crypto.uuid(), host: accountHost(context) },
+    type: "post",
+    post: {
+      key: { id: "checkin-summary-" + (await flare.crypto.uuid()), host: accountHost(context) },
       createdAt: now.toISOString(),
-      actor: profile,
-      kind: "App",
-      text: lines.join("\n"),
+      author: profile,
+      content: { format: "plain", value: lines.join("\n") },
+      detailType: "link",
+      url: context.origin + "/",
     },
   };
 }

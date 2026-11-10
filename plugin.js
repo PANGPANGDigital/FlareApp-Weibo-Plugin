@@ -92,7 +92,8 @@
           }
           const credential = await readCredential();
           const items = [];
-          if (request.page.direction === "refresh") {
+          const isTopOrRefresh = request.page.direction === "refresh" || !request.page.cursor;
+          if (isTopOrRefresh) {
             const results = [];
             let truncated = false;
             try {
@@ -104,13 +105,14 @@
               }
             } catch (error) {
               if (isAuthenticationError(error)) throw error;
+              const errorMsg = error && typeof error === "object" && "message" in error ? String(error.message?.value || error.message) : "";
               results.push({
                 name: "\u8D85\u8BDD\u5217\u8868",
                 status: "failed",
-                message: "\u8BFB\u53D6\u7B7E\u5230\u72B6\u6001\u5931\u8D25\uFF1B\u672A\u63D0\u4EA4\u7B7E\u5230\uFF0C\u8BF7\u7A0D\u540E\u5237\u65B0\u91CD\u8BD5\u3002"
+                message: errorMsg || "\u8BFB\u53D6\u7B7E\u5230\u72B6\u6001\u5931\u8D25\uFF1B\u672A\u63D0\u4EA4\u7B7E\u5230\uFF0C\u8BF7\u7A0D\u540E\u5237\u65B0\u91CD\u8BD5\u3002"
               });
             }
-            items.push(await makeSummaryItem(results, truncated, credential.profile, context));
+            items.push(await makeSummaryPost(results, truncated, credential.profile, context));
           }
           const feedPage = await fetchFriendsTimeline(
             context,
@@ -142,7 +144,7 @@
     for (let page = 0; page < MAX_TOPIC_PAGES; page++) {
       const url = context.origin + TOPICS_PATH + (sinceId ? "&since_id=" + encodeURIComponent(sinceId) : "");
       const response = await requestJson(url, context, cookies, {}, false, true);
-      if (!response || !isOkResponse(response.ok)) {
+      if (!response || !isOkResponse(response.ok) || !hasCards(response)) {
         if (page === 0) {
           const fallbackUrl = context.origin + TOPICS_FALLBACK_PATH;
           const fallbackResp = await requestJson(fallbackUrl, context, cookies, {}, false, true);
@@ -162,6 +164,10 @@
     }
     return { results, toCheck, xsrfToken, truncated };
   }
+  function hasCards(response) {
+    const data = isRecord(response.data) ? response.data : {};
+    return Array.isArray(data.cards) && data.cards.length > 0;
+  }
   function parseTopicCards(response, seen, results, toCheck, context) {
     const data = isRecord(response.data) ? response.data : {};
     const cards = Array.isArray(data.cards) ? data.cards : [];
@@ -171,9 +177,9 @@
       const entries = Array.isArray(cardValue.card_group) ? cardValue.card_group : [cardValue];
       for (const entryValue of entries) {
         if (!isRecord(entryValue)) continue;
-        const name = typeof entryValue.title_sub === "string" ? entryValue.title_sub.trim() : "";
+        const name = typeof entryValue.title_sub === "string" && entryValue.title_sub.trim() || typeof entryValue.title === "string" && entryValue.title.trim() || typeof entryValue.card_title === "string" && entryValue.card_title.trim() || typeof entryValue.desc1 === "string" && entryValue.desc1.trim() || "";
         if (!name) continue;
-        const button = Array.isArray(entryValue.buttons) && entryValue.buttons.length ? isRecord(entryValue.buttons[0]) ? entryValue.buttons[0] : {} : {};
+        const button = Array.isArray(entryValue.buttons) && entryValue.buttons.length ? isRecord(entryValue.buttons[0]) ? entryValue.buttons[0] : {} : isRecord(entryValue.button) ? entryValue.button : {};
         const buttonName = typeof button.name === "string" ? button.name : "";
         const scheme = typeof button.scheme === "string" ? button.scheme : typeof entryValue.scheme === "string" ? entryValue.scheme : "";
         const id = topicId(scheme) || (typeof entryValue.itemid === "string" ? entryValue.itemid : name);
@@ -434,7 +440,7 @@
       return named[code.toLowerCase()] ?? entity;
     });
   }
-  async function makeSummaryItem(results, truncated, profile, context) {
+  async function makeSummaryPost(results, truncated, profile, context) {
     const already = results.filter((item) => item.status === "already").length;
     const success = results.filter((item) => item.status === "success").length;
     const failed = results.filter((item) => item.status === "failed").length;
@@ -444,26 +450,30 @@
     const timeStr = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}`;
     const lines = [
       `\u3010\u8D85\u8BDD\u7B7E\u5230\u901A\u77E5 \xB7 ${timeStr}\u3011`,
-      `\u53D1\u73B0 ${checked} \u4E2A\u8D85\u8BDD\uFF1A\u5DF2\u7B7E ${already} \u4E2A\uFF0C\u672C\u6B21\u6210\u529F ${success} \u4E2A\uFF0C\u5931\u8D25 ${failed} \u4E2A\u3002`
+      `\u5173\u6CE8\u8D85\u8BDD\uFF1A\u5171 ${checked} \u4E2A\uFF08\u5DF2\u7B7E ${already}\uFF0C\u672C\u6B21\u6210\u529F ${success}\uFF0C\u5931\u8D25 ${failed}\uFF09`
     ];
-    if (unknown) lines.push(`${unknown} \u4E2A\u8D85\u8BDD\u6682\u672A\u63D0\u4F9B\u6709\u6548\u7B7E\u5230\u5165\u53E3\uFF0C\u5DF2\u8DF3\u8FC7\u3002`);
-    if (truncated) lines.push(`\u8D85\u8BDD\u5217\u8868\u5DF2\u8FBE ${MAX_TOPIC_PAGES} \u9875\u9650\u5236\uFF0C\u672A\u7EE7\u7EED\u68C0\u6D4B\u540E\u7EED\u9875\u9762\u3002`);
+    if (unknown > 0) lines.push(`\u2139\uFE0F \u53E6\u6709 ${unknown} \u4E2A\u8D85\u8BDD\u672A\u8BC6\u522B\u5230\u7B7E\u5230\u5165\u53E3\u3002`);
+    if (truncated) lines.push(`\u26A0\uFE0F \u8D85\u8BDD\u5217\u8868\u5DF2\u8FBE ${MAX_TOPIC_PAGES} \u9875\u9650\u5236\u3002`);
     const successes = results.filter((item) => item.status === "success").slice(0, 5);
     if (successes.length) {
-      lines.push("\u672C\u6B21\u6210\u529F\uFF1A" + successes.map((item) => item.name).join("\u3001"));
+      lines.push("\u2705 \u672C\u6B21\u7B7E\u5230\u6210\u529F\uFF1A" + successes.map((item) => item.name).join("\u3001"));
     }
     const failures = results.filter((item) => item.status === "failed").slice(0, MAX_FAILURE_DETAILS);
     if (failures.length) {
-      lines.push("\u5931\u8D25\u9879\uFF1A" + failures.map((item) => `${item.name}\uFF08${item.message || "\u8BF7\u6C42\u5931\u8D25"}\uFF09`).join("\uFF1B"));
+      lines.push("\u274C \u7B7E\u5230\u5931\u8D25\uFF1A" + failures.map((item) => `${item.name}\uFF08${item.message || "\u8BF7\u6C42\u5931\u8D25"}\uFF09`).join("\uFF1B"));
+    }
+    if (checked === 0) {
+      lines.push("\uFF08\u672A\u626B\u63CF\u5230\u5173\u6CE8\u7684\u8D85\u8BDD\uFF0C\u8BF7\u786E\u8BA4\u5FAE\u535A\u8D26\u53F7\u5DF2\u5173\u6CE8\u8D85\u8BDD\uFF09");
     }
     return {
-      type: "message",
-      message: {
-        key: { id: "checkin-" + await flare.crypto.uuid(), host: accountHost(context) },
+      type: "post",
+      post: {
+        key: { id: "checkin-summary-" + await flare.crypto.uuid(), host: accountHost(context) },
         createdAt: now.toISOString(),
-        actor: profile,
-        kind: "App",
-        text: lines.join("\n")
+        author: profile,
+        content: { format: "plain", value: lines.join("\n") },
+        detailType: "link",
+        url: context.origin + "/"
       }
     };
   }
