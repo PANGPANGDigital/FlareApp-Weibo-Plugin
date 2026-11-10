@@ -5,9 +5,17 @@
   var PROFILE_PATH = "/profile/info";
   var FRIENDS_TIMELINE_PATH = "/feed/friends";
   var TOPICS_PATH = "/api/container/getIndex?containerid=100803_-_followsuper";
+  var TOPICS_FALLBACK_PATH = "/api/container/getIndex?containerid=100803_-_page_my_follow_super";
   var MAX_TOPIC_PAGES = 30;
   var MAX_FAILURE_DETAILS = 10;
   var MAX_TIMELINE_MEDIA = 12;
+  var DEFAULT_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+    "Referer": "https://m.weibo.cn/",
+    "Accept": "application/json, text/plain, */*",
+    "X-Requested-With": "XMLHttpRequest",
+    "MWeibo-Pwa": "1"
+  };
   defineFlareSocialPlugin({
     login: {
       browser: {
@@ -16,19 +24,48 @@
         },
         async check(request, context) {
           const probeUrl = context.origin + API_CONFIG_PATH;
-          const cookies = request.cookies.cookies.filter((cookie) => cookie.sourceUrl === probeUrl).filter((cookie) => ["SUB", "SUBP", "_T_WM", "MLOGIN", "ALF"].includes(cookie.name)).map(({ name, value }) => ({ name, value }));
-          if (!cookies.some((cookie) => cookie.name === "SUB" && cookie.value)) {
+          const cookieNames = ["SUB", "SUBP", "_T_WM", "MLOGIN", "ALF", "XSRF-TOKEN"];
+          const cookieMap = /* @__PURE__ */ new Map();
+          for (const cookie of request.cookies.cookies) {
+            if (cookieNames.includes(cookie.name) && cookie.value) {
+              cookieMap.set(cookie.name, cookie.value);
+            }
+          }
+          if (!cookieMap.has("SUB") || !cookieMap.get("SUB")) {
             return { type: "pending" };
           }
-          const config = await requestJson(probeUrl, context, cookies, {}, true);
+          const cookies = Array.from(cookieMap.entries()).map(([name, value]) => ({ name, value }));
+          const config = await requestJson(probeUrl, context, cookies, {}, true, true);
           if (!config || !isLoggedIn(config)) return { type: "pending" };
-          const profileResponse = await requestJson(
-            context.origin + PROFILE_PATH,
-            context,
-            cookies
-          );
-          if (!profileResponse) return { type: "pending" };
-          const user = requiredObject(requiredObject(profileResponse.data).user);
+          const configData = isRecord(config.data) ? config.data : {};
+          let user = null;
+          if (isRecord(configData.user)) {
+            user = configData.user;
+          } else if (configData.uid) {
+            user = {
+              id: configData.uid,
+              screen_name: configData.screen_name || String(configData.uid)
+            };
+          }
+          if (!user || !user.screen_name) {
+            try {
+              const profileResponse = await requestJson(
+                context.origin + PROFILE_PATH,
+                context,
+                cookies,
+                {},
+                true,
+                true
+              );
+              if (profileResponse && isRecord(profileResponse.data) && isRecord(profileResponse.data.user)) {
+                user = profileResponse.data.user;
+              }
+            } catch {
+            }
+          }
+          if (!user) {
+            return { type: "pending" };
+          }
           const profile = mapProfile(user, context);
           const credential = { cookies, profile };
           return {
@@ -47,7 +84,7 @@
     capabilities: {
       timeline: {
         async page(request, context) {
-          if (request.timelineId !== "checkin") {
+          if (request.timelineId && request.timelineId !== "checkin" && request.timelineId !== "friends") {
             fail("Unsupported", "Unknown timeline");
           }
           if (request.page.direction !== "refresh" && request.page.direction !== "older") {
@@ -92,9 +129,10 @@
   });
   async function fetchFollowedTopics(context, cookies) {
     const config = await requestJson(context.origin + API_CONFIG_PATH, context, cookies);
-    if (!config) fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
-    if (!isLoggedIn(config)) fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
-    const configData = requiredObject(config.data);
+    if (!config || !isLoggedIn(config)) {
+      fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
+    }
+    const configData = isRecord(config.data) ? config.data : {};
     const xsrfToken = typeof configData.st === "string" ? configData.st : "";
     const results = [];
     const toCheck = [];
@@ -103,37 +141,19 @@
     let truncated = false;
     for (let page = 0; page < MAX_TOPIC_PAGES; page++) {
       const url = context.origin + TOPICS_PATH + (sinceId ? "&since_id=" + encodeURIComponent(sinceId) : "");
-      const response = await requestJson(url, context, cookies);
-      if (!response) fail("InvalidResponse", "\u5FAE\u535A\u6CA1\u6709\u8FD4\u56DE\u8D85\u8BDD\u5217\u8868\u3002");
-      if (!isOkResponse(response.ok)) {
-        fail("Remote", "\u5FAE\u535A\u6CA1\u6709\u8FD4\u56DE\u8D85\u8BDD\u5217\u8868\u3002");
-      }
-      const data = requiredObject(response.data);
-      const cards = Array.isArray(data.cards) ? data.cards : [];
-      let added = 0;
-      for (const cardValue of cards) {
-        const card = requiredObject(cardValue);
-        const entries = Array.isArray(card.card_group) ? card.card_group : [cardValue];
-        for (const entryValue of entries) {
-          const entry = requiredObject(entryValue);
-          const name = typeof entry.title_sub === "string" ? entry.title_sub.trim() : "";
-          if (!name) continue;
-          const button = Array.isArray(entry.buttons) && entry.buttons.length ? requiredObject(entry.buttons[0]) : {};
-          const buttonName = typeof button.name === "string" ? button.name : "";
-          const scheme = typeof button.scheme === "string" ? button.scheme : "";
-          const id = topicId(scheme) || (typeof entry.itemid === "string" ? entry.itemid : name);
-          if (seen.has(id)) continue;
-          seen.add(id);
-          added++;
-          if (buttonName.includes("\u5DF2\u7B7E")) {
-            results.push({ name, status: "already" });
-          } else if (buttonName.includes("\u7B7E\u5230") && scheme) {
-            toCheck.push({ name, id, signed: false, checkinUrl: resolveSameOriginUrl(scheme, context) });
-          } else {
-            results.push({ name, status: "unknown", message: "\u5FAE\u535A\u6CA1\u6709\u63D0\u4F9B\u53EF\u7528\u7684\u7B7E\u5230\u72B6\u6001\u3002" });
+      const response = await requestJson(url, context, cookies, {}, false, true);
+      if (!response || !isOkResponse(response.ok)) {
+        if (page === 0) {
+          const fallbackUrl = context.origin + TOPICS_FALLBACK_PATH;
+          const fallbackResp = await requestJson(fallbackUrl, context, cookies, {}, false, true);
+          if (fallbackResp && isOkResponse(fallbackResp.ok)) {
+            parseTopicCards(fallbackResp, seen, results, toCheck, context);
           }
         }
+        break;
       }
+      const data = isRecord(response.data) ? response.data : {};
+      const added = parseTopicCards(response, seen, results, toCheck, context);
       const info = isRecord(data.cardlistInfo) ? data.cardlistInfo : {};
       const next = typeof info.since_id === "string" ? info.since_id : "";
       if (!next || next === sinceId || added === 0) break;
@@ -142,41 +162,114 @@
     }
     return { results, toCheck, xsrfToken, truncated };
   }
+  function parseTopicCards(response, seen, results, toCheck, context) {
+    const data = isRecord(response.data) ? response.data : {};
+    const cards = Array.isArray(data.cards) ? data.cards : [];
+    let added = 0;
+    for (const cardValue of cards) {
+      if (!isRecord(cardValue)) continue;
+      const entries = Array.isArray(cardValue.card_group) ? cardValue.card_group : [cardValue];
+      for (const entryValue of entries) {
+        if (!isRecord(entryValue)) continue;
+        const name = typeof entryValue.title_sub === "string" ? entryValue.title_sub.trim() : "";
+        if (!name) continue;
+        const button = Array.isArray(entryValue.buttons) && entryValue.buttons.length ? isRecord(entryValue.buttons[0]) ? entryValue.buttons[0] : {} : {};
+        const buttonName = typeof button.name === "string" ? button.name : "";
+        const scheme = typeof button.scheme === "string" ? button.scheme : typeof entryValue.scheme === "string" ? entryValue.scheme : "";
+        const id = topicId(scheme) || (typeof entryValue.itemid === "string" ? entryValue.itemid : name);
+        if (seen.has(id)) continue;
+        seen.add(id);
+        added++;
+        const isSigned = buttonName.includes("\u5DF2\u7B7E") || buttonName.includes("\u5DF2\u7C3D") || buttonName.includes("\u4ECA\u65E5\u5DF2\u7B7E") || buttonName.includes("\u4ECA\u65E5\u5DF2\u7C3D");
+        const isCheckin = buttonName.includes("\u7B7E\u5230") || buttonName.includes("\u7C3D\u5230");
+        if (isSigned) {
+          results.push({ name, status: "already" });
+        } else if (isCheckin && scheme) {
+          const checkinUrl = resolveCheckinUrl(scheme, context);
+          if (checkinUrl) {
+            toCheck.push({ name, id, signed: false, checkinUrl });
+          } else {
+            results.push({ name, status: "unknown", message: "\u7B7E\u5230\u5730\u5740\u65E0\u6CD5\u8BC6\u522B" });
+          }
+        } else {
+          results.push({ name, status: "unknown", message: "\u5FAE\u535A\u672A\u63D0\u4F9B\u53EF\u7528\u7B7E\u5230\u5165\u53E3" });
+        }
+      }
+    }
+    return added;
+  }
+  function resolveCheckinUrl(scheme, context) {
+    if (!scheme || typeof scheme !== "string") return void 0;
+    const trimmed = scheme.trim();
+    if (trimmed.startsWith("/")) {
+      return context.origin + trimmed;
+    }
+    if (trimmed.startsWith(context.origin + "/")) {
+      return trimmed;
+    }
+    if (trimmed.startsWith("http://m.weibo.cn/")) {
+      return "https://m.weibo.cn/" + trimmed.slice("http://m.weibo.cn/".length);
+    }
+    const match = /[?&](?:pageid|containerid)=([0-9a-zA-Z_-]+)/.exec(trimmed) || /containerid=([0-9a-zA-Z_-]+)/.exec(trimmed);
+    if (match) {
+      return `${context.origin}/api/container/getIndex?containerid=${encodeURIComponent(match[1])}_-_checkin`;
+    }
+    return void 0;
+  }
   async function checkInTopic(topic, xsrfToken, context, cookies) {
     if (!topic.checkinUrl) {
-      return { name: topic.name, status: "failed", message: "\u7B7E\u5230\u5730\u5740\u4E0D\u662F\u5FAE\u535A\u5F53\u524D\u8D26\u53F7\u7AD9\u70B9\u3002" };
+      return { name: topic.name, status: "failed", message: "\u7F3A\u5C11\u6709\u6548\u7B7E\u5230\u5730\u5740\u3002" };
     }
     try {
       let url = topic.checkinUrl;
       if (xsrfToken && !/[?&]st=/.test(url)) {
         url += (url.includes("?") ? "&" : "?") + "st=" + encodeURIComponent(xsrfToken);
       }
-      const response = await requestJson(url, context, cookies, {
-        "x-xsrf-token": xsrfToken
-      });
-      if (!response) return { name: topic.name, status: "failed", message: "\u5FAE\u535A\u672A\u8FD4\u56DE\u7B7E\u5230\u7ED3\u679C\u3002" };
+      const headers = {};
+      if (xsrfToken) {
+        headers["x-xsrf-token"] = xsrfToken;
+      }
+      const response = await requestJson(url, context, cookies, headers, true, true);
+      if (!response) {
+        return { name: topic.name, status: "failed", message: "\u5FAE\u535A\u672A\u8FD4\u56DE\u7B7E\u5230\u7ED3\u679C\u3002" };
+      }
       const message = extractMessage(response);
-      if (isOkResponse(response.ok)) {
-        if (message.includes("\u5DF2\u7B7E")) return { name: topic.name, status: "already", message };
+      const code = typeof response.code === "number" ? response.code : void 0;
+      const ok = isOkResponse(response.ok) || code === 1e5 || response.result === 1 || response.result === "1";
+      if (ok) {
+        if (message.includes("\u5DF2\u7B7E") || message.includes("\u5DF2\u7C3D")) {
+          return { name: topic.name, status: "already", message };
+        }
         return { name: topic.name, status: "success", message: message || "\u7B7E\u5230\u6210\u529F" };
       }
-      if (message.includes("\u5DF2\u7B7E")) return { name: topic.name, status: "already", message };
-      return { name: topic.name, status: "failed", message: safeRemoteMessage(message) };
+      if (message.includes("\u5DF2\u7B7E") || message.includes("\u5DF2\u7C3D") || code === 382004) {
+        return { name: topic.name, status: "already", message: message || "\u4ECA\u65E5\u5DF2\u7B7E\u5230" };
+      }
+      return {
+        name: topic.name,
+        status: "failed",
+        message: safeRemoteMessage(message || (typeof response.msg === "string" ? response.msg : ""))
+      };
     } catch (error) {
       if (isAuthenticationError(error)) throw error;
-      return { name: topic.name, status: "failed", message: "\u7B7E\u5230\u8BF7\u6C42\u5931\u8D25\u6216\u5FAE\u535A\u62D2\u7EDD\u4E86\u8BF7\u6C42\u3002" };
+      return { name: topic.name, status: "failed", message: "\u7B7E\u5230\u8BF7\u6C42\u5931\u8D25\u6216\u88AB\u98CE\u63A7\u3002" };
     }
   }
   async function fetchFriendsTimeline(context, cookies, cursor) {
     const url = context.origin + FRIENDS_TIMELINE_PATH + (cursor ? "?max_id=" + encodeURIComponent(cursor) : "");
-    const response = await requestJson(url, context, cookies);
-    if (!response) fail("InvalidResponse", "\u5FAE\u535A\u6CA1\u6709\u8FD4\u56DE\u6700\u65B0\u65F6\u95F4\u7EBF\u3002");
-    if (response.ok !== void 0 && !isOkResponse(response.ok)) {
-      fail("Remote", "\u5FAE\u535A\u6CA1\u6709\u8FD4\u56DE\u6700\u65B0\u65F6\u95F4\u7EBF\u3002");
+    let response = null;
+    try {
+      response = await requestJson(url, context, cookies, {}, false, true);
+    } catch (error) {
+      if (isAuthenticationError(error)) throw error;
+      return { items: [] };
     }
-    const data = requiredObject(response.data);
+    if (!response || !isOkResponse(response.ok)) {
+      return { items: [] };
+    }
+    const data = isRecord(response.data) ? response.data : {};
     if (!Array.isArray(data.statuses)) {
-      fail("InvalidResponse", "\u5FAE\u535A\u6700\u65B0\u65F6\u95F4\u7EBF\u683C\u5F0F\u65E0\u6CD5\u8BC6\u522B\u3002");
+      return { items: [] };
     }
     const items = data.statuses.map((status) => mapTimelineStatus(status, context)).filter((item) => item !== void 0);
     const rawCursor = data.next_cursor_str ?? data.next_cursor;
@@ -347,11 +440,18 @@
     const failed = results.filter((item) => item.status === "failed").length;
     const unknown = results.filter((item) => item.status === "unknown").length;
     const checked = already + success + failed + unknown;
+    const now = /* @__PURE__ */ new Date();
+    const timeStr = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}`;
     const lines = [
-      `\u7B7E\u5230\u68C0\u67E5\u5B8C\u6210\uFF1A\u53D1\u73B0 ${checked} \u4E2A\u8D85\u8BDD\uFF0C\u5DF2\u7B7E\u5230 ${already} \u4E2A\uFF0C\u672C\u6B21\u6210\u529F ${success} \u4E2A\uFF0C\u5931\u8D25 ${failed} \u4E2A\u3002`
+      `\u3010\u8D85\u8BDD\u7B7E\u5230\u901A\u77E5 \xB7 ${timeStr}\u3011`,
+      `\u53D1\u73B0 ${checked} \u4E2A\u8D85\u8BDD\uFF1A\u5DF2\u7B7E ${already} \u4E2A\uFF0C\u672C\u6B21\u6210\u529F ${success} \u4E2A\uFF0C\u5931\u8D25 ${failed} \u4E2A\u3002`
     ];
-    if (unknown) lines.push(`${unknown} \u4E2A\u8D85\u8BDD\u7684\u7B7E\u5230\u72B6\u6001\u65E0\u6CD5\u8BC6\u522B\uFF0C\u5DF2\u8DF3\u8FC7\u3002`);
-    if (truncated) lines.push(`\u8D85\u8BDD\u5217\u8868\u8FBE\u5230 ${MAX_TOPIC_PAGES} \u9875\u4E0A\u9650\uFF0C\u672A\u68C0\u67E5\u540E\u7EED\u9875\u9762\u3002`);
+    if (unknown) lines.push(`${unknown} \u4E2A\u8D85\u8BDD\u6682\u672A\u63D0\u4F9B\u6709\u6548\u7B7E\u5230\u5165\u53E3\uFF0C\u5DF2\u8DF3\u8FC7\u3002`);
+    if (truncated) lines.push(`\u8D85\u8BDD\u5217\u8868\u5DF2\u8FBE ${MAX_TOPIC_PAGES} \u9875\u9650\u5236\uFF0C\u672A\u7EE7\u7EED\u68C0\u6D4B\u540E\u7EED\u9875\u9762\u3002`);
+    const successes = results.filter((item) => item.status === "success").slice(0, 5);
+    if (successes.length) {
+      lines.push("\u672C\u6B21\u6210\u529F\uFF1A" + successes.map((item) => item.name).join("\u3001"));
+    }
     const failures = results.filter((item) => item.status === "failed").slice(0, MAX_FAILURE_DETAILS);
     if (failures.length) {
       lines.push("\u5931\u8D25\u9879\uFF1A" + failures.map((item) => `${item.name}\uFF08${item.message || "\u8BF7\u6C42\u5931\u8D25"}\uFF09`).join("\uFF1B"));
@@ -360,14 +460,14 @@
       type: "message",
       message: {
         key: { id: "checkin-" + await flare.crypto.uuid(), host: accountHost(context) },
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        createdAt: now.toISOString(),
         actor: profile,
         kind: "App",
         text: lines.join("\n")
       }
     };
   }
-  async function requestJson(url, context, cookies, extraHeaders = {}, allowUnauthorized = false) {
+  async function requestJson(url, context, cookies, extraHeaders = {}, allowUnauthorized = false, allowNotFound = false) {
     if (!isSameOrigin(url, context.origin)) {
       fail("Unsupported", "\u5FAE\u535A\u63A5\u53E3\u8DF3\u8F6C\u5230\u4E86\u6240\u9009\u8D26\u53F7\u7AD9\u70B9\u4E4B\u5916\uFF0C\u5DF2\u505C\u6B62\u8BF7\u6C42\u3002");
     }
@@ -378,7 +478,8 @@
         url,
         cookies,
         headers: {
-          referer: context.origin + "/",
+          ...DEFAULT_HEADERS,
+          "Referer": context.origin + "/",
           ...extraHeaders
         }
       });
@@ -389,6 +490,7 @@
       throw error;
     }
     if (response.status === 401 && allowUnauthorized) return null;
+    if (response.status === 404 && allowNotFound) return null;
     if (response.status === 401 || response.status === 403) {
       fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\u6216\u8BF7\u6C42\u672A\u83B7\u6388\u6743\u3002");
     }
@@ -421,10 +523,12 @@
   function mapProfile(user, context) {
     const id = requiredScalarText(user.idstr ?? user.id);
     const handle = requiredScalarText(user.screen_name);
+    const avatarUrl = safeWeiboMediaUrl(user.avatar_hd ?? user.profile_image_url);
     return {
       key: { id, host: accountHost(context) },
       handle,
-      displayName: handle
+      displayName: handle,
+      ...avatarUrl ? { avatarUrl } : {}
     };
   }
   function isLoggedIn(value) {
@@ -435,13 +539,8 @@
     return value === 1 || value === true || value === "1";
   }
   function topicId(scheme) {
-    const match = /containerid=([\w-]+)/.exec(scheme);
+    const match = /containerid=([0-9a-zA-Z_-]+)/.exec(scheme);
     return match ? match[1] : "";
-  }
-  function resolveSameOriginUrl(scheme, context) {
-    if (scheme.startsWith("/")) return context.origin + scheme;
-    if (scheme.startsWith(context.origin + "/")) return scheme;
-    return void 0;
   }
   function isSameOrigin(url, origin) {
     return url === origin || url.startsWith(origin + "/");

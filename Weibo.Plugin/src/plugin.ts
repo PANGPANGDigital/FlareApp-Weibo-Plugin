@@ -16,9 +16,19 @@ const API_CONFIG_PATH = "/api/config";
 const PROFILE_PATH = "/profile/info";
 const FRIENDS_TIMELINE_PATH = "/feed/friends";
 const TOPICS_PATH = "/api/container/getIndex?containerid=100803_-_followsuper";
+const TOPICS_FALLBACK_PATH = "/api/container/getIndex?containerid=100803_-_page_my_follow_super";
 const MAX_TOPIC_PAGES = 30;
 const MAX_FAILURE_DETAILS = 10;
 const MAX_TIMELINE_MEDIA = 12;
+
+const DEFAULT_HEADERS: Record<string, string> = {
+  "User-Agent":
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148",
+  "Referer": "https://m.weibo.cn/",
+  "Accept": "application/json, text/plain, */*",
+  "X-Requested-With": "XMLHttpRequest",
+  "MWeibo-Pwa": "1",
+};
 
 defineFlareSocialPlugin({
   login: {
@@ -28,24 +38,55 @@ defineFlareSocialPlugin({
       },
       async check(request, context) {
         const probeUrl = context.origin + API_CONFIG_PATH;
-        const cookies = request.cookies.cookies
-          .filter((cookie) => cookie.sourceUrl === probeUrl)
-          .filter((cookie) => ["SUB", "SUBP", "_T_WM", "MLOGIN", "ALF"].includes(cookie.name))
-          .map(({ name, value }) => ({ name, value }));
-        if (!cookies.some((cookie) => cookie.name === "SUB" && cookie.value)) {
+        const cookieNames = ["SUB", "SUBP", "_T_WM", "MLOGIN", "ALF", "XSRF-TOKEN"];
+        const cookieMap = new Map<string, string>();
+        for (const cookie of request.cookies.cookies) {
+          if (cookieNames.includes(cookie.name) && cookie.value) {
+            cookieMap.set(cookie.name, cookie.value);
+          }
+        }
+        if (!cookieMap.has("SUB") || !cookieMap.get("SUB")) {
+          return { type: "pending" };
+        }
+        const cookies: CookiePair[] = Array.from(cookieMap.entries()).map(([name, value]) => ({ name, value }));
+
+        const config = await requestJson(probeUrl, context, cookies, {}, true, true);
+        if (!config || !isLoggedIn(config)) return { type: "pending" };
+
+        const configData = isRecord(config.data) ? config.data : {};
+
+        let user: Record<string, unknown> | null = null;
+        if (isRecord(configData.user)) {
+          user = configData.user;
+        } else if (configData.uid) {
+          user = {
+            id: configData.uid,
+            screen_name: configData.screen_name || String(configData.uid),
+          };
+        }
+
+        if (!user || !user.screen_name) {
+          try {
+            const profileResponse = await requestJson(
+              context.origin + PROFILE_PATH,
+              context,
+              cookies,
+              {},
+              true,
+              true,
+            );
+            if (profileResponse && isRecord(profileResponse.data) && isRecord(profileResponse.data.user)) {
+              user = profileResponse.data.user;
+            }
+          } catch {
+            // profile/info is optional
+          }
+        }
+
+        if (!user) {
           return { type: "pending" };
         }
 
-        const config = await requestJson(probeUrl, context, cookies, {}, true);
-        if (!config || !isLoggedIn(config)) return { type: "pending" };
-
-        const profileResponse = await requestJson(
-          context.origin + PROFILE_PATH,
-          context,
-          cookies,
-        );
-        if (!profileResponse) return { type: "pending" };
-        const user = requiredObject(requiredObject(profileResponse.data).user);
         const profile = mapProfile(user, context);
         const credential: StoredCredential = { cookies, profile };
 
@@ -65,7 +106,7 @@ defineFlareSocialPlugin({
   capabilities: {
     timeline: {
       async page(request, context) {
-        if (request.timelineId !== "checkin") {
+        if (request.timelineId && request.timelineId !== "checkin" && request.timelineId !== "friends") {
           fail("Unsupported", "Unknown timeline");
         }
         if (request.page.direction !== "refresh" && request.page.direction !== "older") {
@@ -121,9 +162,10 @@ async function fetchFollowedTopics(
   cookies: CookiePair[],
 ): Promise<{ results: TopicResult[]; toCheck: Topic[]; xsrfToken: string; truncated: boolean }> {
   const config = await requestJson(context.origin + API_CONFIG_PATH, context, cookies);
-  if (!config) fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
-  if (!isLoggedIn(config)) fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
-  const configData = requiredObject(config.data);
+  if (!config || !isLoggedIn(config)) {
+    fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
+  }
+  const configData = isRecord(config.data) ? config.data : {};
   const xsrfToken = typeof configData.st === "string" ? configData.st : "";
 
   const results: TopicResult[] = [];
@@ -135,42 +177,20 @@ async function fetchFollowedTopics(
   for (let page = 0; page < MAX_TOPIC_PAGES; page++) {
     const url = context.origin + TOPICS_PATH +
       (sinceId ? "&since_id=" + encodeURIComponent(sinceId) : "");
-    const response = await requestJson(url, context, cookies);
-    if (!response) fail("InvalidResponse", "微博没有返回超话列表。");
-    if (!isOkResponse(response.ok)) {
-      fail("Remote", "微博没有返回超话列表。");
-    }
-
-    const data = requiredObject(response.data);
-    const cards = Array.isArray(data.cards) ? data.cards : [];
-    let added = 0;
-    for (const cardValue of cards) {
-      const card = requiredObject(cardValue);
-      const entries = Array.isArray(card.card_group) ? card.card_group : [cardValue];
-      for (const entryValue of entries) {
-        const entry = requiredObject(entryValue);
-        const name = typeof entry.title_sub === "string" ? entry.title_sub.trim() : "";
-        if (!name) continue;
-
-        const button = Array.isArray(entry.buttons) && entry.buttons.length
-          ? requiredObject(entry.buttons[0])
-          : {};
-        const buttonName = typeof button.name === "string" ? button.name : "";
-        const scheme = typeof button.scheme === "string" ? button.scheme : "";
-        const id = topicId(scheme) || (typeof entry.itemid === "string" ? entry.itemid : name);
-        if (seen.has(id)) continue;
-        seen.add(id);
-        added++;
-
-        if (buttonName.includes("已签")) {
-          results.push({ name, status: "already" });
-        } else if (buttonName.includes("签到") && scheme) {
-          toCheck.push({ name, id, signed: false, checkinUrl: resolveSameOriginUrl(scheme, context) });
-        } else {
-          results.push({ name, status: "unknown", message: "微博没有提供可用的签到状态。" });
+    const response = await requestJson(url, context, cookies, {}, false, true);
+    if (!response || !isOkResponse(response.ok)) {
+      if (page === 0) {
+        const fallbackUrl = context.origin + TOPICS_FALLBACK_PATH;
+        const fallbackResp = await requestJson(fallbackUrl, context, cookies, {}, false, true);
+        if (fallbackResp && isOkResponse(fallbackResp.ok)) {
+          parseTopicCards(fallbackResp, seen, results, toCheck, context);
         }
       }
+      break;
     }
+
+    const data = isRecord(response.data) ? response.data : {};
+    const added = parseTopicCards(response, seen, results, toCheck, context);
 
     const info = isRecord(data.cardlistInfo) ? data.cardlistInfo : {};
     const next = typeof info.since_id === "string" ? info.since_id : "";
@@ -182,6 +202,82 @@ async function fetchFollowedTopics(
   return { results, toCheck, xsrfToken, truncated };
 }
 
+function parseTopicCards(
+  response: Record<string, unknown>,
+  seen: Set<string>,
+  results: TopicResult[],
+  toCheck: Topic[],
+  context: PluginInvocationContextV1,
+): number {
+  const data = isRecord(response.data) ? response.data : {};
+  const cards = Array.isArray(data.cards) ? data.cards : [];
+  let added = 0;
+
+  for (const cardValue of cards) {
+    if (!isRecord(cardValue)) continue;
+    const entries = Array.isArray(cardValue.card_group) ? cardValue.card_group : [cardValue];
+    for (const entryValue of entries) {
+      if (!isRecord(entryValue)) continue;
+      const name = typeof entryValue.title_sub === "string" ? entryValue.title_sub.trim() : "";
+      if (!name) continue;
+
+      const button = Array.isArray(entryValue.buttons) && entryValue.buttons.length
+        ? (isRecord(entryValue.buttons[0]) ? entryValue.buttons[0] : {})
+        : {};
+      const buttonName = typeof button.name === "string" ? button.name : "";
+      const scheme = typeof button.scheme === "string" ? button.scheme : (typeof entryValue.scheme === "string" ? entryValue.scheme : "");
+
+      const id = topicId(scheme) || (typeof entryValue.itemid === "string" ? entryValue.itemid : name);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      added++;
+
+      const isSigned = buttonName.includes("已签") ||
+        buttonName.includes("已簽") ||
+        buttonName.includes("今日已签") ||
+        buttonName.includes("今日已簽");
+      const isCheckin = buttonName.includes("签到") || buttonName.includes("簽到");
+
+      if (isSigned) {
+        results.push({ name, status: "already" });
+      } else if (isCheckin && scheme) {
+        const checkinUrl = resolveCheckinUrl(scheme, context);
+        if (checkinUrl) {
+          toCheck.push({ name, id, signed: false, checkinUrl });
+        } else {
+          results.push({ name, status: "unknown", message: "签到地址无法识别" });
+        }
+      } else {
+        results.push({ name, status: "unknown", message: "微博未提供可用签到入口" });
+      }
+    }
+  }
+  return added;
+}
+
+function resolveCheckinUrl(scheme: string, context: PluginInvocationContextV1): string | undefined {
+  if (!scheme || typeof scheme !== "string") return undefined;
+  const trimmed = scheme.trim();
+
+  if (trimmed.startsWith("/")) {
+    return context.origin + trimmed;
+  }
+  if (trimmed.startsWith(context.origin + "/")) {
+    return trimmed;
+  }
+  if (trimmed.startsWith("http://m.weibo.cn/")) {
+    return "https://m.weibo.cn/" + trimmed.slice("http://m.weibo.cn/".length);
+  }
+
+  const match = /[?&](?:pageid|containerid)=([0-9a-zA-Z_-]+)/.exec(trimmed) ||
+    /containerid=([0-9a-zA-Z_-]+)/.exec(trimmed);
+  if (match) {
+    return `${context.origin}/api/container/getIndex?containerid=${encodeURIComponent(match[1])}_-_checkin`;
+  }
+
+  return undefined;
+}
+
 async function checkInTopic(
   topic: Topic,
   xsrfToken: string,
@@ -189,7 +285,7 @@ async function checkInTopic(
   cookies: CookiePair[],
 ): Promise<TopicResult> {
   if (!topic.checkinUrl) {
-    return { name: topic.name, status: "failed", message: "签到地址不是微博当前账号站点。" };
+    return { name: topic.name, status: "failed", message: "缺少有效签到地址。" };
   }
 
   try {
@@ -197,20 +293,37 @@ async function checkInTopic(
     if (xsrfToken && !/[?&]st=/.test(url)) {
       url += (url.includes("?") ? "&" : "?") + "st=" + encodeURIComponent(xsrfToken);
     }
-    const response = await requestJson(url, context, cookies, {
-      "x-xsrf-token": xsrfToken,
-    });
-    if (!response) return { name: topic.name, status: "failed", message: "微博未返回签到结果。" };
+    const headers: Record<string, string> = {};
+    if (xsrfToken) {
+      headers["x-xsrf-token"] = xsrfToken;
+    }
+
+    const response = await requestJson(url, context, cookies, headers, true, true);
+    if (!response) {
+      return { name: topic.name, status: "failed", message: "微博未返回签到结果。" };
+    }
+
     const message = extractMessage(response);
-    if (isOkResponse(response.ok)) {
-      if (message.includes("已签")) return { name: topic.name, status: "already", message };
+    const code = typeof response.code === "number" ? response.code : undefined;
+    const ok = isOkResponse(response.ok) || code === 100000 || response.result === 1 || response.result === "1";
+
+    if (ok) {
+      if (message.includes("已签") || message.includes("已簽")) {
+        return { name: topic.name, status: "already", message };
+      }
       return { name: topic.name, status: "success", message: message || "签到成功" };
     }
-    if (message.includes("已签")) return { name: topic.name, status: "already", message };
-    return { name: topic.name, status: "failed", message: safeRemoteMessage(message) };
+    if (message.includes("已签") || message.includes("已簽") || code === 382004) {
+      return { name: topic.name, status: "already", message: message || "今日已签到" };
+    }
+    return {
+      name: topic.name,
+      status: "failed",
+      message: safeRemoteMessage(message || (typeof response.msg === "string" ? response.msg : "")),
+    };
   } catch (error) {
     if (isAuthenticationError(error)) throw error;
-    return { name: topic.name, status: "failed", message: "签到请求失败或微博拒绝了请求。" };
+    return { name: topic.name, status: "failed", message: "签到请求失败或被风控。" };
   }
 }
 
@@ -221,15 +334,20 @@ async function fetchFriendsTimeline(
 ): Promise<{ items: TimelineItemV1[]; olderCursor?: string }> {
   const url = context.origin + FRIENDS_TIMELINE_PATH +
     (cursor ? "?max_id=" + encodeURIComponent(cursor) : "");
-  const response = await requestJson(url, context, cookies);
-  if (!response) fail("InvalidResponse", "微博没有返回最新时间线。");
-  if (response.ok !== undefined && !isOkResponse(response.ok)) {
-    fail("Remote", "微博没有返回最新时间线。");
+  let response: Record<string, unknown> | null = null;
+  try {
+    response = await requestJson(url, context, cookies, {}, false, true);
+  } catch (error) {
+    if (isAuthenticationError(error)) throw error;
+    return { items: [] };
+  }
+  if (!response || !isOkResponse(response.ok)) {
+    return { items: [] };
   }
 
-  const data = requiredObject(response.data);
+  const data = isRecord(response.data) ? response.data : {};
   if (!Array.isArray(data.statuses)) {
-    fail("InvalidResponse", "微博最新时间线格式无法识别。");
+    return { items: [] };
   }
 
   const items = data.statuses
@@ -422,11 +540,22 @@ async function makeSummaryItem(
   const failed = results.filter((item) => item.status === "failed").length;
   const unknown = results.filter((item) => item.status === "unknown").length;
   const checked = already + success + failed + unknown;
+
+  const now = new Date();
+  const timeStr = `${now.getHours().toString().padStart(2, "0")}:${now.getMinutes().toString().padStart(2, "0")}`;
+
   const lines = [
-    `签到检查完成：发现 ${checked} 个超话，已签到 ${already} 个，本次成功 ${success} 个，失败 ${failed} 个。`,
+    `【超话签到通知 · ${timeStr}】`,
+    `发现 ${checked} 个超话：已签 ${already} 个，本次成功 ${success} 个，失败 ${failed} 个。`,
   ];
-  if (unknown) lines.push(`${unknown} 个超话的签到状态无法识别，已跳过。`);
-  if (truncated) lines.push(`超话列表达到 ${MAX_TOPIC_PAGES} 页上限，未检查后续页面。`);
+  if (unknown) lines.push(`${unknown} 个超话暂未提供有效签到入口，已跳过。`);
+  if (truncated) lines.push(`超话列表已达 ${MAX_TOPIC_PAGES} 页限制，未继续检测后续页面。`);
+
+  const successes = results.filter((item) => item.status === "success").slice(0, 5);
+  if (successes.length) {
+    lines.push("本次成功：" + successes.map((item) => item.name).join("、"));
+  }
+
   const failures = results.filter((item) => item.status === "failed").slice(0, MAX_FAILURE_DETAILS);
   if (failures.length) {
     lines.push("失败项：" + failures.map((item) => `${item.name}（${item.message || "请求失败"}）`).join("；"));
@@ -436,7 +565,7 @@ async function makeSummaryItem(
     type: "message",
     message: {
       key: { id: "checkin-" + await flare.crypto.uuid(), host: accountHost(context) },
-      createdAt: new Date().toISOString(),
+      createdAt: now.toISOString(),
       actor: profile,
       kind: "App",
       text: lines.join("\n"),
@@ -450,6 +579,7 @@ async function requestJson(
   cookies: CookiePair[],
   extraHeaders: Record<string, string> = {},
   allowUnauthorized = false,
+  allowNotFound = false,
 ): Promise<Record<string, unknown> | null> {
   if (!isSameOrigin(url, context.origin)) {
     fail("Unsupported", "微博接口跳转到了所选账号站点之外，已停止请求。");
@@ -462,7 +592,8 @@ async function requestJson(
       url,
       cookies,
       headers: {
-        referer: context.origin + "/",
+        ...DEFAULT_HEADERS,
+        "Referer": context.origin + "/",
         ...extraHeaders,
       },
     });
@@ -474,6 +605,7 @@ async function requestJson(
   }
 
   if (response.status === 401 && allowUnauthorized) return null;
+  if (response.status === 404 && allowNotFound) return null;
   if (response.status === 401 || response.status === 403) {
     fail("AuthenticationRequired", "微博登录状态已失效或请求未获授权。");
   }
@@ -509,10 +641,12 @@ async function readCredential(): Promise<StoredCredential> {
 function mapProfile(user: Record<string, unknown>, context: PluginInvocationContextV1): ProfileV1 {
   const id = requiredScalarText(user.idstr ?? user.id);
   const handle = requiredScalarText(user.screen_name);
+  const avatarUrl = safeWeiboMediaUrl(user.avatar_hd ?? user.profile_image_url);
   return {
     key: { id, host: accountHost(context) },
     handle,
     displayName: handle,
+    ...(avatarUrl ? { avatarUrl } : {}),
   };
 }
 
@@ -526,14 +660,8 @@ function isOkResponse(value: unknown): boolean {
 }
 
 function topicId(scheme: string): string {
-  const match = /containerid=([\w-]+)/.exec(scheme);
+  const match = /containerid=([0-9a-zA-Z_-]+)/.exec(scheme);
   return match ? match[1] : "";
-}
-
-function resolveSameOriginUrl(scheme: string, context: PluginInvocationContextV1): string | undefined {
-  if (scheme.startsWith("/")) return context.origin + scheme;
-  if (scheme.startsWith(context.origin + "/")) return scheme;
-  return undefined;
 }
 
 function isSameOrigin(url: string, origin: string): boolean {
