@@ -300,8 +300,12 @@ defineFlareSocialPlugin({
           } else {
             feedEndpoint = TIMELINE_CIRCLE_PATH;
           }
+        } else if (timelineId.startsWith("group-")) {
+          feedEndpoint = `${TIMELINE_GROUP_PATH}?gid=${encodeURIComponent(timelineId.slice("group-".length))}`;
         } else if (timelineId.startsWith("group:")) {
           feedEndpoint = `${TIMELINE_GROUP_PATH}?gid=${encodeURIComponent(timelineId.slice("group:".length))}`;
+        } else if (request.parameters && typeof request.parameters.gid === "string") {
+          feedEndpoint = `${TIMELINE_GROUP_PATH}?gid=${encodeURIComponent(request.parameters.gid)}`;
         }
 
         const cursor = request.page.direction === "older" ? request.page.cursor : undefined;
@@ -347,10 +351,12 @@ defineFlareSocialPlugin({
               icon: "Featured",
             });
           } else {
+            const safeGid = g.gid.replace(/[^0-9a-zA-Z_.-]/g, "_");
             timelineItems.push({
-              id: "group:" + g.gid,
+              id: "group-" + safeGid,
               title: { value: g.name },
               icon: "List",
+              parameters: { gid: g.gid },
             });
           }
         }
@@ -834,7 +840,7 @@ async function fetchUserGroups(
   }
   try {
     const url = context.origin + API_CONFIG_LIST_PATH;
-    const res = await requestJson(url, context, cookies, {}, false, true);
+    const res = await requestJson(url, context, cookies, {}, true, true);
     if (res && isOkResponse(res.ok) && isRecord(res.data) && Array.isArray(res.data.groups)) {
       const groups: WeiboGroupInfo[] = [];
       for (const item of res.data.groups) {
