@@ -1,6 +1,6 @@
 {
-  "name": "weibo-enhance",
-  "version": "0.3.0",
+  "name": "flareapp-weibo-plugin",
+  "version": "0.3.1",
   "private": true,
   "scripts": {
     "check": "tsc --noEmit",

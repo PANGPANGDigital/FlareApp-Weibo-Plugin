@@ -122,11 +122,36 @@ defineFlareSocialPlugin({
           user = configData.user;
         }
 
-        // Fetch real user info (nickname & avatar) from /api/container/getIndex?type=uid&value=...
+        // Fetch real user info (nickname & avatar) from /api/container/getIndex
         if (uid && (!user || !user.avatar_hd || !user.screen_name)) {
           try {
             const userIndex = await requestJson(
               context.origin + "/api/container/getIndex?type=uid&value=" + encodeURIComponent(uid),
+              context,
+              cookies,
+              {},
+              true,
+              true,
+            );
+            if (userIndex && isRecord(userIndex.data) && isRecord(userIndex.data.userInfo)) {
+              user = {
+                ...(user || {}),
+                ...userIndex.data.userInfo,
+              };
+            }
+          } catch {
+            // fallback
+          }
+        }
+
+        if (uid && (!user || !user.avatar_hd || !user.screen_name)) {
+          try {
+            const userIndex = await requestJson(
+              context.origin +
+                "/api/container/getIndex?type=uid&value=" +
+                encodeURIComponent(uid) +
+                "&containerid=100505" +
+                encodeURIComponent(uid),
               context,
               cookies,
               {},
@@ -168,6 +193,8 @@ defineFlareSocialPlugin({
             capabilities: {
               "flare.datasource.timeline/v1": ["page"],
               "flare.datasource.tab-catalog/v1": ["page"],
+              "flare.datasource.post/v1": ["detail", "context"],
+              "flare.datasource.profile/v1": ["byId", "byHandle"],
             },
           },
         };
@@ -291,6 +318,118 @@ defineFlareSocialPlugin({
           ],
           endReached: true,
         };
+      },
+    },
+
+    post: {
+      async detail(request, context) {
+        const credential = await readCredential();
+        const id = request.key.id;
+        const url = context.origin + "/statuses/show?id=" + encodeURIComponent(id);
+        const response = await requestJson(url, context, credential.cookies, {}, false, true);
+        if (!response || !isRecord(response.data)) {
+          fail("NotFound", "微博不存在或已被删除。");
+        }
+        const data = response.data as Record<string, unknown>;
+        const post = mapTimelinePost(data, context);
+        if (!post) {
+          fail("NotFound", "无法解析该微博。");
+        }
+        const retweet = isRecord(data.retweeted_status)
+          ? mapTimelinePost(data.retweeted_status as Record<string, unknown>, context)
+          : undefined;
+        return {
+          post,
+          ...(retweet ? { presentation: { repost: retweet } } : {}),
+        };
+      },
+
+      async context(request, context) {
+        const credential = await readCredential();
+        const id = request.key.id;
+        const cursor = request.page.cursor;
+        let url =
+          context.origin +
+          "/comments/hotflow?id=" +
+          encodeURIComponent(id) +
+          "&mid=" +
+          encodeURIComponent(id) +
+          "&max_id_type=0";
+        if (cursor) {
+          url += "&max_id=" + encodeURIComponent(cursor);
+        }
+
+        let response: Record<string, unknown> | null = null;
+        try {
+          response = await requestJson(url, context, credential.cookies, {}, false, true);
+        } catch (error) {
+          if (isAuthenticationError(error)) throw error;
+          return { items: [], endReached: true };
+        }
+
+        if (!response || !isOkResponse(response.ok) || !isRecord(response.data)) {
+          return { items: [], endReached: true };
+        }
+
+        const data = response.data as Record<string, unknown>;
+        const rootComments = Array.isArray(data.data)
+          ? data.data
+          : (Array.isArray(data.root_comments) ? data.root_comments : []);
+        const items: TimelineItemV1[] = [];
+
+        for (const c of rootComments) {
+          if (!isRecord(c)) continue;
+          const commentId = String(c.idstr || c.id || "");
+          if (!commentId) continue;
+
+          const commentUser = isRecord(c.user) ? c.user : {};
+          const author: ProfileV1 = {
+            key: { id: String(commentUser.id || commentId), host: accountHost(context) },
+            displayName: String(commentUser.screen_name || "微博用户"),
+            handle: String(commentUser.screen_name || commentUser.id || "weibo"),
+            avatarUrl: safeWeiboMediaUrl(commentUser.profile_image_url || commentUser.avatar_hd),
+          };
+
+          const text = typeof c.text === "string" ? htmlToPlainText(c.text) : "";
+          const likeCount = typeof c.like_count === "number" ? c.like_count : undefined;
+
+          items.push({
+            type: "post",
+            post: {
+              key: { id: "comment-" + commentId, host: accountHost(context) },
+              createdAt: parseWeiboDate(typeof c.created_at === "string" ? c.created_at : undefined),
+              content: { format: "plain", value: text || " " },
+              author,
+              replyTo: request.key,
+              ...(likeCount !== undefined ? { favouritesCount: likeCount } : {}),
+            },
+          });
+        }
+
+        const rawMaxId = data.max_id;
+        const olderCursor =
+          (typeof rawMaxId === "number" || typeof rawMaxId === "string") &&
+          String(rawMaxId) !== "0" &&
+          String(rawMaxId) !== cursor
+            ? String(rawMaxId)
+            : undefined;
+
+        return {
+          items,
+          endReached: !olderCursor,
+          ...(olderCursor ? { olderCursor } : {}),
+        };
+      },
+    },
+
+    profile: {
+      async byId(request, context) {
+        const credential = await readCredential();
+        return await fetchProfileData(request.key.id, context, credential.cookies);
+      },
+      async byHandle(request, context) {
+        const credential = await readCredential();
+        return await fetchProfileData(request.handle, context, credential.cookies);
       },
     },
   },
@@ -540,7 +679,6 @@ function mapTimelinePost(value: Record<string, unknown>, context: PluginInvocati
     key: { id, host },
     createdAt: parseWeiboDate(optionalScalarText(value.created_at)),
     content: { format: "plain", value: statusText || "（微博内容为空）" },
-    detailType: "link",
     url: context.origin + "/detail/" + encodeURIComponent(id),
     ...(user ? { author: user } : {}),
   };
@@ -804,13 +942,85 @@ async function readCredential(): Promise<StoredCredential> {
 
 function mapProfile(user: Record<string, unknown>, context: PluginInvocationContextV1): ProfileV1 {
   const id = requiredScalarText(user.idstr ?? user.id);
-  const handle = requiredScalarText(user.screen_name);
+  const handle = requiredScalarText(user.screen_name ?? user.idstr ?? user.id);
   const avatarUrl = safeWeiboMediaUrl(user.avatar_hd ?? user.profile_image_url);
   return {
     key: { id, host: accountHost(context) },
     handle,
     displayName: handle,
     ...(avatarUrl ? { avatarUrl } : {}),
+  };
+}
+
+async function fetchProfileData(
+  idOrHandle: string,
+  context: PluginInvocationContextV1,
+  cookies: CookiePair[],
+): Promise<ProfileV1> {
+  let userInfo: Record<string, unknown> | null = null;
+  try {
+    const res = await requestJson(
+      context.origin + "/api/container/getIndex?type=uid&value=" + encodeURIComponent(idOrHandle),
+      context,
+      cookies,
+      {},
+      true,
+      true,
+    );
+    if (res && isRecord(res.data) && isRecord(res.data.userInfo)) {
+      userInfo = res.data.userInfo;
+    }
+  } catch {
+    // fallback
+  }
+
+  if (!userInfo) {
+    try {
+      const res = await requestJson(
+        context.origin +
+          "/api/container/getIndex?type=uid&value=" +
+          encodeURIComponent(idOrHandle) +
+          "&containerid=100505" +
+          encodeURIComponent(idOrHandle),
+        context,
+        cookies,
+        {},
+        true,
+        true,
+      );
+      if (res && isRecord(res.data) && isRecord(res.data.userInfo)) {
+        userInfo = res.data.userInfo;
+      }
+    } catch {
+      // fallback
+    }
+  }
+
+  if (userInfo) {
+    const id = String(userInfo.id || idOrHandle);
+    const screenName = String(userInfo.screen_name || id);
+    const avatarUrl = safeWeiboMediaUrl(userInfo.avatar_hd ?? userInfo.profile_image_url);
+    const description =
+      typeof userInfo.description === "string" && userInfo.description.trim()
+        ? { format: "plain" as const, value: userInfo.description.trim() }
+        : undefined;
+
+    return {
+      key: { id, host: accountHost(context) },
+      handle: screenName,
+      displayName: screenName,
+      ...(avatarUrl ? { avatarUrl } : {}),
+      ...(description ? { description } : {}),
+      ...(typeof userInfo.followers_count === "number" ? { followersCount: userInfo.followers_count } : {}),
+      ...(typeof userInfo.follow_count === "number" ? { followingCount: userInfo.follow_count } : {}),
+      ...(typeof userInfo.statuses_count === "number" ? { postsCount: userInfo.statuses_count } : {}),
+    };
+  }
+
+  return {
+    key: { id: idOrHandle, host: accountHost(context) },
+    handle: idOrHandle,
+    displayName: idOrHandle,
   };
 }
 

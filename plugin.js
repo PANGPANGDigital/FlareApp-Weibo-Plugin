@@ -111,6 +111,25 @@
             } catch {
             }
           }
+          if (uid && (!user || !user.avatar_hd || !user.screen_name)) {
+            try {
+              const userIndex = await requestJson(
+                context.origin + "/api/container/getIndex?type=uid&value=" + encodeURIComponent(uid) + "&containerid=100505" + encodeURIComponent(uid),
+                context,
+                cookies,
+                {},
+                true,
+                true
+              );
+              if (userIndex && isRecord(userIndex.data) && isRecord(userIndex.data.userInfo)) {
+                user = {
+                  ...user || {},
+                  ...userIndex.data.userInfo
+                };
+              }
+            } catch {
+            }
+          }
           if (!user && uid) {
             user = {
               id: uid,
@@ -131,7 +150,9 @@
               profile,
               capabilities: {
                 "flare.datasource.timeline/v1": ["page"],
-                "flare.datasource.tab-catalog/v1": ["page"]
+                "flare.datasource.tab-catalog/v1": ["page"],
+                "flare.datasource.post/v1": ["detail", "context"],
+                "flare.datasource.profile/v1": ["byId", "byHandle"]
               }
             }
           };
@@ -235,6 +256,91 @@
             ],
             endReached: true
           };
+        }
+      },
+      post: {
+        async detail(request, context) {
+          const credential = await readCredential();
+          const id = request.key.id;
+          const url = context.origin + "/statuses/show?id=" + encodeURIComponent(id);
+          const response = await requestJson(url, context, credential.cookies, {}, false, true);
+          if (!response || !isRecord(response.data)) {
+            fail("NotFound", "\u5FAE\u535A\u4E0D\u5B58\u5728\u6216\u5DF2\u88AB\u5220\u9664\u3002");
+          }
+          const data = response.data;
+          const post = mapTimelinePost(data, context);
+          if (!post) {
+            fail("NotFound", "\u65E0\u6CD5\u89E3\u6790\u8BE5\u5FAE\u535A\u3002");
+          }
+          const retweet = isRecord(data.retweeted_status) ? mapTimelinePost(data.retweeted_status, context) : void 0;
+          return {
+            post,
+            ...retweet ? { presentation: { repost: retweet } } : {}
+          };
+        },
+        async context(request, context) {
+          const credential = await readCredential();
+          const id = request.key.id;
+          const cursor = request.page.cursor;
+          let url = context.origin + "/comments/hotflow?id=" + encodeURIComponent(id) + "&mid=" + encodeURIComponent(id) + "&max_id_type=0";
+          if (cursor) {
+            url += "&max_id=" + encodeURIComponent(cursor);
+          }
+          let response = null;
+          try {
+            response = await requestJson(url, context, credential.cookies, {}, false, true);
+          } catch (error) {
+            if (isAuthenticationError(error)) throw error;
+            return { items: [], endReached: true };
+          }
+          if (!response || !isOkResponse(response.ok) || !isRecord(response.data)) {
+            return { items: [], endReached: true };
+          }
+          const data = response.data;
+          const rootComments = Array.isArray(data.data) ? data.data : Array.isArray(data.root_comments) ? data.root_comments : [];
+          const items = [];
+          for (const c of rootComments) {
+            if (!isRecord(c)) continue;
+            const commentId = String(c.idstr || c.id || "");
+            if (!commentId) continue;
+            const commentUser = isRecord(c.user) ? c.user : {};
+            const author = {
+              key: { id: String(commentUser.id || commentId), host: accountHost(context) },
+              displayName: String(commentUser.screen_name || "\u5FAE\u535A\u7528\u6237"),
+              handle: String(commentUser.screen_name || commentUser.id || "weibo"),
+              avatarUrl: safeWeiboMediaUrl(commentUser.profile_image_url || commentUser.avatar_hd)
+            };
+            const text = typeof c.text === "string" ? htmlToPlainText(c.text) : "";
+            const likeCount = typeof c.like_count === "number" ? c.like_count : void 0;
+            items.push({
+              type: "post",
+              post: {
+                key: { id: "comment-" + commentId, host: accountHost(context) },
+                createdAt: parseWeiboDate(typeof c.created_at === "string" ? c.created_at : void 0),
+                content: { format: "plain", value: text || " " },
+                author,
+                replyTo: request.key,
+                ...likeCount !== void 0 ? { favouritesCount: likeCount } : {}
+              }
+            });
+          }
+          const rawMaxId = data.max_id;
+          const olderCursor = (typeof rawMaxId === "number" || typeof rawMaxId === "string") && String(rawMaxId) !== "0" && String(rawMaxId) !== cursor ? String(rawMaxId) : void 0;
+          return {
+            items,
+            endReached: !olderCursor,
+            ...olderCursor ? { olderCursor } : {}
+          };
+        }
+      },
+      profile: {
+        async byId(request, context) {
+          const credential = await readCredential();
+          return await fetchProfileData(request.key.id, context, credential.cookies);
+        },
+        async byHandle(request, context) {
+          const credential = await readCredential();
+          return await fetchProfileData(request.handle, context, credential.cookies);
         }
       }
     }
@@ -419,7 +525,6 @@
       key: { id, host },
       createdAt: parseWeiboDate(optionalScalarText(value.created_at)),
       content: { format: "plain", value: statusText || "\uFF08\u5FAE\u535A\u5185\u5BB9\u4E3A\u7A7A\uFF09" },
-      detailType: "link",
       url: context.origin + "/detail/" + encodeURIComponent(id),
       ...user ? { author: user } : {}
     };
@@ -651,13 +756,67 @@
   }
   function mapProfile(user, context) {
     const id = requiredScalarText(user.idstr ?? user.id);
-    const handle = requiredScalarText(user.screen_name);
+    const handle = requiredScalarText(user.screen_name ?? user.idstr ?? user.id);
     const avatarUrl = safeWeiboMediaUrl(user.avatar_hd ?? user.profile_image_url);
     return {
       key: { id, host: accountHost(context) },
       handle,
       displayName: handle,
       ...avatarUrl ? { avatarUrl } : {}
+    };
+  }
+  async function fetchProfileData(idOrHandle, context, cookies) {
+    let userInfo = null;
+    try {
+      const res = await requestJson(
+        context.origin + "/api/container/getIndex?type=uid&value=" + encodeURIComponent(idOrHandle),
+        context,
+        cookies,
+        {},
+        true,
+        true
+      );
+      if (res && isRecord(res.data) && isRecord(res.data.userInfo)) {
+        userInfo = res.data.userInfo;
+      }
+    } catch {
+    }
+    if (!userInfo) {
+      try {
+        const res = await requestJson(
+          context.origin + "/api/container/getIndex?type=uid&value=" + encodeURIComponent(idOrHandle) + "&containerid=100505" + encodeURIComponent(idOrHandle),
+          context,
+          cookies,
+          {},
+          true,
+          true
+        );
+        if (res && isRecord(res.data) && isRecord(res.data.userInfo)) {
+          userInfo = res.data.userInfo;
+        }
+      } catch {
+      }
+    }
+    if (userInfo) {
+      const id = String(userInfo.id || idOrHandle);
+      const screenName = String(userInfo.screen_name || id);
+      const avatarUrl = safeWeiboMediaUrl(userInfo.avatar_hd ?? userInfo.profile_image_url);
+      const description = typeof userInfo.description === "string" && userInfo.description.trim() ? { format: "plain", value: userInfo.description.trim() } : void 0;
+      return {
+        key: { id, host: accountHost(context) },
+        handle: screenName,
+        displayName: screenName,
+        ...avatarUrl ? { avatarUrl } : {},
+        ...description ? { description } : {},
+        ...typeof userInfo.followers_count === "number" ? { followersCount: userInfo.followers_count } : {},
+        ...typeof userInfo.follow_count === "number" ? { followingCount: userInfo.follow_count } : {},
+        ...typeof userInfo.statuses_count === "number" ? { postsCount: userInfo.statuses_count } : {}
+      };
+    }
+    return {
+      key: { id: idOrHandle, host: accountHost(context) },
+      handle: idOrHandle,
+      displayName: idOrHandle
     };
   }
   function isLoggedIn(value) {

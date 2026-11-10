@@ -1,39 +1,90 @@
-# Weibo Enhance (Flare 微博增强版插件)
+# FlareApp-Weibo-Plugin (Weibo Enhance 微博增强版)
 
-Flare Social Plugin API v1 插件 —— 微博增强版，支持超话自动签到与多分组时间线。
+[![Flare Plugin API v1](https://img.shields.io/badge/Flare%20Plugin%20API-v1-blue)](https://github.com/DimensionDev/Flare)
+[![Version](https://img.shields.io/badge/version-0.3.1-brightgreen)](#)
+[![License](https://img.shields.io/badge/license-MIT-green)](#)
 
-## 功能特性
+专为 **Flare App**（iOS / macOS / Android / Desktop）打造的深度定制微博增强插件。支持**打开/刷新时间线自动完成关注超话签到**、**Flare 原生博文正文与热门评论流展示**、**多分组标签页（好友圈、特别关注）**，并带有专属防混淆服务探测器与角标图标。
 
-1. **自动超话签到**：
-   - 打开或下拉刷新「最新微博Enhance」时间线时，自动扫描并签到关注的超话。
-   - 签到通知卡片使用专属「超话签到」标识和当前用户的微博头像，隐去纯数字 UID。
-2. **多标签页 / 分组支持**：
-   - **最新微博Enhance**：主时间线，刷新时自动执行超话签到并展示签到摘要卡片，同时呈现最新关注博文。
-   - **好友圈**：纯净好友圈动态流。
-   - **特别关注**：单独浏览特别关注博主的动态。
-   - 支持动态目录（Tab Catalog），可在 Flare 的标签页管理中随时添加或切换。
-3. **平台与专属图标识别**：
-   - 带有专属绿色打勾签到角标的微博图标，与 Flare 内置微博彻底区分。
-   - 内置高优先级探测器（Detector，优先级 1000）：在 Flare 输入 `https://m.weibo.cn` 即可精准识别为 **Weibo Enhance**。
+---
 
-## 在 Flare 中安装
+## 🌟 核心功能特性
 
-在 Flare 的插件管理中选择通过 GitHub 安装：
+### 1. 自动超话检测与签到
+- **免手动操作**：只要打开或下拉刷新「最新微博Enhance」时间线，插件即自动扫描所有已关注的超话并安全提交签到。
+- **优雅通知卡片**：签到完成后在时间线顶部置顶呈现签到结果统计卡片（已签、成功、失败列表）。
+- **隐私保护与专属标识**：隐去纯数字 UID 与 `@UID` 格式的机器 handle，统一以专属「**超话签到**」身份发布通知，并挂载当前用户的真实微博头像。
 
-```text
-https://github.com/PANGPANGDigital/Flare-App-Plugin
-```
+### 2. Flare 原生正文与评论流详情（告别网页内嵌）
+- **原生沉浸体验**：点击任意微博卡片，直接进入 Flare 原生详情页（而非跳转手机网页版内嵌 Webview），完美契合系统动效与暗色模式。
+- **完整博文内容**：完整渲染单图/九宫格高清大图、微博长文、转发原微博（Presentation Repost）、点赞与转发计数。
+- **原生评论区支持**：自动拉取微博热门评论流（Hotflow Comments），在正文下方原生呈现评论者头像、昵称、评论发布时间与点赞数。
 
-确认权限后安装。添加账号时在「输入服务器以开始」输入 `https://m.weibo.cn`（或 `m.weibo.cn`），系统会自动匹配出 **Weibo Enhance**，点击「登录」完成微博网页授权即可。
+### 3. 多分组与标签页（好友圈 / 特别关注 / 动态分组）
+- **`最新微博Enhance`**（主时间线）：聚合最新博文，刷新时触发超话自动签到。
+- **`好友圈`**：纯净加载互相关注好友的最新动态。
+- **`特别关注`**：专为核心博主打造的分组时间线。
+- **Tab Catalog 动态目录**：支持在 Flare 的标签管理中自由增删和重排分组标签。
 
-> **提示**：若已有账号想立刻看到新增的「好友圈」与「特别关注」标签页，可在时间线管理中点击添加，或重新登录账号，Flare 会自动创建对应的分组标签。
+### 4. 彻底解决与 Flare 内置微博混淆
+- **专属带角标图标**：精心设计的微博专属图标，右下角配有高辨识度绿色签到勾选角标。
+- **高优先级服务探测（Detector 优先级 1000）**：在 Flare「输入服务器以开始」输入 `https://m.weibo.cn` 或 `m.weibo.cn` 时，系统会自动优先匹配为 **Weibo Enhance**，点击即可登录插件账号。
+- **完整用户资料展示**：自动获取当前登录用户的真实昵称（Screen Name）、高清头像（Avatar HD）以及简介，账号列表不再显示空白头像与纯数字 ID。
 
-## 本地开发与构建
+---
 
-所有源码及配置文件已统一在根目录维护：
+## 📲 在 Flare App 中安装使用
+
+### 第一步：安装插件
+1. 打开 Flare App，进入 **设置 → 插件**。
+2. 点击右上角 **添加 / 从 GitHub 安装**，输入本插件仓库地址：
+   ```text
+   https://github.com/PANGPANGDigital/FlareApp-Weibo-Plugin
+   ```
+   *(若尚未重命名完成，原地址 `https://github.com/PANGPANGDigital/Flare-App-Plugin` 亦可自动重定向安装)*。
+3. 检查所需权限（包括媒体网络权限 `mediaNetwork`，用于加载高清微博配图与头像）后确认安装。
+
+### 第二步：添加账号
+1. 在 Flare 添加账号页面（“输入服务器以开始”），输入：
+   ```text
+   https://m.weibo.cn
+   ```
+2. 下方探测器将自动识别并展示带有签到角标的 **`Weibo Enhance`** 卡片。
+3. 点击 **「登录」**，在弹出的微博移动版网页中输入账号密码或短信验证码完成登录。
+
+### 第三步：体验签到与浏览
+- 登录成功后，Flare 会自动生成 **`Weibo Enhance`**、**`好友圈`** 与 **`特别关注`** 标签页。
+- 打开「最新微博Enhance」下拉刷新，超话自动检测签到，并在顶部收到签到通知。
+- 点击任意微博卡片，即可沉浸式浏览原生正文大图与热门评论区！
+
+---
+
+## 🛠 本地开发与编译
+
+本项目基于单层根目录架构，无需多层嵌套，开箱即用：
 
 ```sh
+# 1. 克隆仓库
+git clone https://github.com/PANGPANGDigital/FlareApp-Weibo-Plugin.git
+cd FlareApp-Weibo-Plugin
+
+# 2. 安装开发依赖 (Node.js 20+)
 npm install
-npm run check    # TypeScript 类型检查
-npm run build    # 构建 plugin.js
+
+# 3. 运行 TypeScript 类型检查
+npm run check
+
+# 4. 构建生成打包后的 plugin.js
+npm run build
+
+# 5. 监听文件变动 (热编译)
+npm run dev
 ```
+
+---
+
+## 📄 许可与声明
+
+- 本项目遵循 **MIT 许可证** 开源。
+- 本项目仅供技术交流与学习，微博及相关商标版权归北京微梦创科网络技术有限公司所有。
+- 插件仅使用用户在本地授权的 Cookie 通过安全沙箱发起必要的数据请求，不收集任何私钥、密码或第三方服务器中间件。
