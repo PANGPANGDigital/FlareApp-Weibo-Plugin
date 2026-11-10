@@ -418,32 +418,7 @@ defineFlareSocialPlugin({
         const currentUserId = credential.profile.key.id;
         const items: TimelineItemV1[] = [];
 
-        // On first page / refresh, prepend the root status post so Flare renders it at the top of the detail screen
-        if (!cursor) {
-          try {
-            const st = await getCsrfToken(context, credential.cookies).catch(() => undefined);
-            const statusData = await fetchSingleStatus(id, context, credential.cookies, st);
-            if (statusData) {
-              const rootPost = mapTimelinePost(statusData, context, currentUserId);
-              if (rootPost) {
-                const retweet = isRecord(statusData.retweeted_status)
-                  ? mapTimelinePost(statusData.retweeted_status as Record<string, unknown>, context, currentUserId)
-                  : undefined;
-                items.push({
-                  type: "post",
-                  post: rootPost,
-                  ...(retweet ? {
-                    presentation: {
-                      quotes: [retweet],
-                    },
-                  } : {}),
-                });
-              }
-            }
-          } catch {
-            // non-fatal, proceed to comments
-          }
-        }
+        const mid = /^\d+$/.test(id) ? id : (bidToMid(id) || id);
 
         let rootComments: unknown[] = [];
         let nextCursor: string | undefined = undefined;
@@ -453,9 +428,9 @@ defineFlareSocialPlugin({
           let url =
             context.origin +
             "/comments/hotflow?id=" +
-            encodeURIComponent(id) +
+            encodeURIComponent(mid) +
             "&mid=" +
-            encodeURIComponent(id) +
+            encodeURIComponent(mid) +
             "&max_id_type=0";
           if (cursor && !cursor.startsWith("page_")) {
             url += "&max_id=" + encodeURIComponent(cursor);
@@ -465,7 +440,7 @@ defineFlareSocialPlugin({
             context,
             credential.cookies,
             { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
-            false,
+            true,
             true,
           );
           if (response && isOkResponse(response.ok) && isRecord(response.data)) {
@@ -494,14 +469,14 @@ defineFlareSocialPlugin({
             const showUrl =
               context.origin +
               "/api/comments/show?id=" +
-              encodeURIComponent(id) +
+              encodeURIComponent(mid) +
               "&page=1";
             const response = await requestJson(
               showUrl,
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
-              false,
+              true,
               true,
             );
             if (response && isOkResponse(response.ok) && isRecord(response.data)) {
@@ -523,7 +498,7 @@ defineFlareSocialPlugin({
             const showUrl =
               context.origin +
               "/api/comments/show?id=" +
-              encodeURIComponent(id) +
+              encodeURIComponent(mid) +
               "&page=" +
               pageNum;
             const response = await requestJson(
@@ -531,7 +506,7 @@ defineFlareSocialPlugin({
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
-              false,
+              true,
               true,
             );
             if (response && isOkResponse(response.ok) && isRecord(response.data)) {
@@ -570,13 +545,17 @@ defineFlareSocialPlugin({
       async mutate(request, context) {
         const credential = await readCredential();
         const st = await getCsrfToken(context, credential.cookies);
-        const rawId = request.key.id;
+        if (!st) {
+          fail("AuthenticationRequired", "无法获取微博安全凭证 (st)，请重新登录。");
+        }
+
+        const rawId = request.actionToken || request.key.id;
         const isComment = rawId.startsWith("comment_") || rawId.startsWith("comment-");
 
         let statusId = rawId;
         let commentId = "";
         if (isComment) {
-          const parts = rawId.split("_");
+          const parts = rawId.split(/[-_]/);
           if (parts.length >= 3) {
             statusId = parts[1];
             commentId = parts[2];
@@ -585,6 +564,8 @@ defineFlareSocialPlugin({
             statusId = commentId;
           }
         }
+
+        const numericStatusId = /^\d+$/.test(statusId) ? statusId : (bidToMid(statusId) || statusId);
 
         if (isComment) {
           // Comment action: Favourite / Unfavourite, Delete
@@ -631,7 +612,7 @@ defineFlareSocialPlugin({
           if (request.action === "Favourite") {
             const res = await requestFormPost(
               context.origin + "/api/attitudes/create",
-              { id: statusId, attitude: "heart", st },
+              { id: numericStatusId, attitude: "heart", st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
@@ -644,7 +625,7 @@ defineFlareSocialPlugin({
           } else if (request.action === "Unfavourite") {
             const res = await requestFormPost(
               context.origin + "/api/attitudes/destroy",
-              { id: statusId, attitude: "heart", st },
+              { id: numericStatusId, attitude: "heart", st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
@@ -658,7 +639,7 @@ defineFlareSocialPlugin({
             const content = request.parameters?.content || "转发微博";
             const res = await requestFormPost(
               context.origin + "/api/statuses/repost",
-              { id: statusId, mid: statusId, content, st },
+              { id: numericStatusId, mid: numericStatusId, content, st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
@@ -671,7 +652,7 @@ defineFlareSocialPlugin({
           } else if (request.action === "Bookmark") {
             await requestFormPost(
               context.origin + "/api/statuses/createfav",
-              { id: statusId, st },
+              { id: numericStatusId, st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
@@ -680,7 +661,7 @@ defineFlareSocialPlugin({
           } else if (request.action === "Unbookmark") {
             await requestFormPost(
               context.origin + "/api/statuses/destroyfav",
-              { id: statusId, st },
+              { id: numericStatusId, st },
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) },
@@ -689,7 +670,7 @@ defineFlareSocialPlugin({
           } else if (request.action === "Delete") {
             await requestFormPost(
               context.origin + "/profile/delMyblog",
-              { mid: statusId, st },
+              { mid: numericStatusId, st },
               context,
               credential.cookies,
               { Referer: context.origin + "/" },
@@ -867,6 +848,9 @@ defineFlareSocialPlugin({
     notification: {
       async page(request, context) {
         const credential = await readCredential();
+        if (!credential.cookies || !credential.cookies.some((c) => c.name === "SUB" && c.value)) {
+          fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
+        }
         const currentUserId = credential.profile.key.id;
         const host = accountHost(context);
         const filterId = request.filterId || "mention";
@@ -875,6 +859,8 @@ defineFlareSocialPlugin({
         const items: TimelineItemV1[] = [];
         let hasMore = false;
 
+        const defaultHeaders = { Referer: context.origin + "/" };
+
         if (filterId === "mention") {
           try {
             const url = context.origin + "/message/mentionsAt?page=" + pageNum;
@@ -882,8 +868,8 @@ defineFlareSocialPlugin({
               url,
               context,
               credential.cookies,
-              { Referer: context.origin + "/message/at" },
-              false,
+              defaultHeaders,
+              true,
               true,
             );
             if (res && isOkResponse(res.ok)) {
@@ -891,7 +877,9 @@ defineFlareSocialPlugin({
                 ? (res.data as Record<string, unknown>[])
                 : isRecord(res.data) && Array.isArray((res.data as Record<string, unknown>).statuses)
                   ? ((res.data as Record<string, unknown>).statuses as Record<string, unknown>[])
-                  : [];
+                  : isRecord(res.data) && Array.isArray((res.data as Record<string, unknown>).data)
+                    ? ((res.data as Record<string, unknown>).data as Record<string, unknown>[])
+                    : [];
               if (list.length > 0) {
                 hasMore = true;
                 for (const item of list) {
@@ -908,9 +896,11 @@ defineFlareSocialPlugin({
                   });
                 }
               }
+            } else if (res && res.ok === -100) {
+              fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
             }
-          } catch {
-            // non-fatal
+          } catch (e) {
+            if (isAuthenticationError(e)) throw e;
           }
         } else if (filterId === "comment") {
           try {
@@ -919,8 +909,8 @@ defineFlareSocialPlugin({
               url,
               context,
               credential.cookies,
-              { Referer: context.origin + "/message/cmt" },
-              false,
+              defaultHeaders,
+              true,
               true,
             );
             if (res && isOkResponse(res.ok)) {
@@ -928,7 +918,9 @@ defineFlareSocialPlugin({
                 ? (res.data as Record<string, unknown>[])
                 : isRecord(res.data) && Array.isArray((res.data as Record<string, unknown>).comments)
                   ? ((res.data as Record<string, unknown>).comments as Record<string, unknown>[])
-                  : [];
+                  : isRecord(res.data) && Array.isArray((res.data as Record<string, unknown>).data)
+                    ? ((res.data as Record<string, unknown>).data as Record<string, unknown>[])
+                    : [];
               if (list.length > 0) {
                 hasMore = true;
                 for (const c of list) {
@@ -999,9 +991,11 @@ defineFlareSocialPlugin({
                   });
                 }
               }
+            } else if (res && res.ok === -100) {
+              fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
             }
-          } catch {
-            // non-fatal
+          } catch (e) {
+            if (isAuthenticationError(e)) throw e;
           }
         } else if (filterId === "like") {
           try {
@@ -1010,8 +1004,8 @@ defineFlareSocialPlugin({
               url,
               context,
               credential.cookies,
-              { Referer: context.origin + "/message/attitude" },
-              false,
+              defaultHeaders,
+              true,
               true,
             );
             if (res && isOkResponse(res.ok)) {
@@ -1019,12 +1013,14 @@ defineFlareSocialPlugin({
                 ? (res.data as Record<string, unknown>[])
                 : isRecord(res.data) && Array.isArray((res.data as Record<string, unknown>).attitudes)
                   ? ((res.data as Record<string, unknown>).attitudes as Record<string, unknown>[])
-                  : [];
+                  : isRecord(res.data) && Array.isArray((res.data as Record<string, unknown>).data)
+                    ? ((res.data as Record<string, unknown>).data as Record<string, unknown>[])
+                    : [];
               if (list.length > 0) {
                 hasMore = true;
                 for (const a of list) {
                   if (!isRecord(a)) continue;
-                  const attitudeId = String(a.idStr || a.id || "");
+                  const attitudeId = String(a.idstr || a.idStr || a.id || "");
                   if (!attitudeId) continue;
                   const actor = isRecord(a.user)
                     ? mapTimelineProfile(a.user as Record<string, unknown>, context)
@@ -1056,9 +1052,11 @@ defineFlareSocialPlugin({
                   });
                 }
               }
+            } else if (res && res.ok === -100) {
+              fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
             }
-          } catch {
-            // non-fatal
+          } catch (e) {
+            if (isAuthenticationError(e)) throw e;
           }
         }
 
@@ -1073,13 +1071,16 @@ defineFlareSocialPlugin({
       async badge(request, context) {
         try {
           const credential = await readCredential();
+          if (!credential.cookies || !credential.cookies.some((c) => c.name === "SUB" && c.value)) {
+            return { value: 0 };
+          }
           const st = await getCsrfToken(context, credential.cookies).catch(() => undefined);
           const unreadUrl = context.origin + "/api/remind/unread?t=" + Date.now();
           const headers: Record<string, string> = {
             Referer: context.origin + "/",
           };
           if (st) {
-            headers["X-Xsrf-Token"] = st;
+            headers["X-XSRF-TOKEN"] = st;
           }
           const response = await requestJson(unreadUrl, context, credential.cookies, headers, true, true);
           if (response && isOkResponse(response.ok) && isRecord(response.data)) {
@@ -1087,7 +1088,8 @@ defineFlareSocialPlugin({
             const mentionStatus = typeof d.mention_status === "number" ? d.mention_status : 0;
             const cmt = typeof d.cmt === "number" ? d.cmt : 0;
             const attitude = typeof d.attitude === "number" ? d.attitude : 0;
-            return { value: mentionStatus + cmt + attitude };
+            const count = Math.min(10000, Math.max(0, mentionStatus + cmt + attitude));
+            return { value: count };
           }
         } catch {
           // non-fatal
@@ -1933,6 +1935,52 @@ async function makeSummaryPost(
   };
 }
 
+const B62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+function b62Decode(str: string): bigint {
+  let res = 0n;
+  for (let i = 0; i < str.length; i++) {
+    const idx = BigInt(B62_ALPHABET.indexOf(str[i]));
+    if (idx < 0n) return 0n;
+    res = res * 62n + idx;
+  }
+  return res;
+}
+
+function bidToMid(bid: string): string {
+  if (!bid) return "";
+  const parts: string[] = [];
+  for (let i = bid.length; i > 0; i -= 4) {
+    const start = Math.max(0, i - 4);
+    const chunk = bid.slice(start, i);
+    let val = String(b62Decode(chunk));
+    if (start > 0) {
+      val = val.padStart(7, "0");
+    }
+    parts.unshift(val);
+  }
+  return parts.join("");
+}
+
+function mergeHeaders(...sources: Array<Record<string, string> | undefined>): Record<string, string> {
+  const result: Record<string, string> = {};
+  const lowerMap = new Map<string, string>();
+  for (const src of sources) {
+    if (!src) continue;
+    for (const [key, value] of Object.entries(src)) {
+      if (value === undefined || value === null) continue;
+      const lower = key.toLowerCase();
+      const existing = lowerMap.get(lower);
+      if (existing) {
+        delete result[existing];
+      }
+      lowerMap.set(lower, key);
+      result[key] = value;
+    }
+  }
+  return result;
+}
+
 async function requestJson(
   url: string,
   context: PluginInvocationContextV1,
@@ -1945,23 +1993,25 @@ async function requestJson(
     fail("Unsupported", "微博接口跳转到了所选账号站点之外，已停止请求。");
   }
 
+  const mergedHeaders = mergeHeaders(
+    DEFAULT_HEADERS,
+    { "Referer": context.origin + "/" },
+    extraHeaders,
+  );
+
   let response: HttpResponseV1;
   try {
     response = await flare.http.request({
       method: "GET",
       url,
       cookies,
-      headers: {
-        ...DEFAULT_HEADERS,
-        "Referer": context.origin + "/",
-        ...extraHeaders,
-      },
+      headers: mergedHeaders,
     });
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "host.unavailable") {
-      fail("Network", "Flare 无法连接微博接口。");
-    }
-    throw error;
+    if (isAuthenticationError(error)) throw error;
+    if (allowUnauthorized || allowNotFound) return null;
+    const msg = error && typeof error === "object" && "message" in error ? String((error as any).message) : "Flare 无法连接微博接口。";
+    fail("Network", msg);
   }
 
   if (response.status === 401 && allowUnauthorized) return null;
@@ -1979,7 +2029,12 @@ async function requestJson(
   } catch {
     fail("InvalidResponse", "微博接口没有返回有效 JSON。");
   }
-  return requiredObject(value);
+
+  const obj = requiredObject(value);
+  if (obj.ok === -100) {
+    fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
+  }
+  return obj;
 }
 
 let cachedSt: { token: string; expiresAt: number } | null = null;
@@ -2018,9 +2073,18 @@ async function requestFormPost(
 
   const xsrfHeaders: Record<string, string> = {};
   if (formValues.st) {
-    xsrfHeaders["X-Xsrf-Token"] = formValues.st;
     xsrfHeaders["X-XSRF-TOKEN"] = formValues.st;
   }
+
+  const mergedHeaders = mergeHeaders(
+    DEFAULT_HEADERS,
+    {
+      "Referer": context.origin + "/",
+      "X-Requested-With": "XMLHttpRequest",
+    },
+    xsrfHeaders,
+    extraHeaders,
+  );
 
   let response: HttpResponseV1;
   try {
@@ -2028,23 +2092,16 @@ async function requestFormPost(
       method: "POST",
       url,
       cookies,
-      headers: {
-        ...DEFAULT_HEADERS,
-        "Referer": extraHeaders["Referer"] || (context.origin + "/"),
-        "X-Requested-With": "XMLHttpRequest",
-        ...xsrfHeaders,
-        ...extraHeaders,
-      },
+      headers: mergedHeaders,
       body: {
         type: "form",
         values: formValues,
       },
     });
   } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "host.unavailable") {
-      fail("Network", "Flare 无法连接微博接口。");
-    }
-    throw error;
+    if (isAuthenticationError(error)) throw error;
+    const msg = error && typeof error === "object" && "message" in error ? String((error as any).message) : "Flare 无法连接微博接口。";
+    fail("Network", msg);
   }
 
   if (response.status === 401 || response.status === 403) {
@@ -2056,21 +2113,24 @@ async function requestFormPost(
     fail("Remote", "微博接口返回 HTTP " + response.status + "。");
   }
 
+  let value: unknown;
   try {
-    const value = JSON.parse(response.body);
-    if (isRecord(value)) {
-      if (value.ok !== undefined && !isOkResponse(value.ok)) {
-        cachedSt = null;
-        const msg = typeof value.msg === "string" ? value.msg : "微博接口操作失败。";
-        fail("Remote", msg);
-      }
-      return value;
-    }
-    return null;
-  } catch (err) {
-    if (isRecord(err) && typeof err.code === "string") throw err;
-    return null;
+    value = JSON.parse(response.body);
+  } catch {
+    fail("InvalidResponse", "微博接口没有返回有效 JSON。");
   }
+
+  const obj = requiredObject(value);
+  if (obj.ok === -100) {
+    cachedSt = null;
+    fail("AuthenticationRequired", "微博登录状态已失效，请重新登录。");
+  }
+  if (obj.ok !== undefined && !isOkResponse(obj.ok)) {
+    cachedSt = null;
+    const msg = typeof obj.msg === "string" ? obj.msg : "微博接口操作失败。";
+    fail("Remote", msg);
+  }
+  return obj;
 }
 
 async function readCredential(): Promise<StoredCredential> {
@@ -2205,7 +2265,15 @@ function safeRemoteMessage(value: string): string {
 }
 
 function isAuthenticationError(error: unknown): boolean {
-  return isRecord(error) && error.code === "AuthenticationRequired";
+  if (!error) return false;
+  if (isRecord(error) && error.code === "AuthenticationRequired") return true;
+  if (
+    isRecord((error as any).__flarePluginErrorV1) &&
+    (error as any).__flarePluginErrorV1.code === "AuthenticationRequired"
+  ) {
+    return true;
+  }
+  return false;
 }
 
 function isCookiePair(value: unknown): value is CookiePair {

@@ -345,32 +345,11 @@
           const cursor = request.page.cursor;
           const currentUserId = credential.profile.key.id;
           const items = [];
-          if (!cursor) {
-            try {
-              const st = await getCsrfToken(context, credential.cookies).catch(() => void 0);
-              const statusData = await fetchSingleStatus(id, context, credential.cookies, st);
-              if (statusData) {
-                const rootPost = mapTimelinePost(statusData, context, currentUserId);
-                if (rootPost) {
-                  const retweet = isRecord(statusData.retweeted_status) ? mapTimelinePost(statusData.retweeted_status, context, currentUserId) : void 0;
-                  items.push({
-                    type: "post",
-                    post: rootPost,
-                    ...retweet ? {
-                      presentation: {
-                        quotes: [retweet]
-                      }
-                    } : {}
-                  });
-                }
-              }
-            } catch {
-            }
-          }
+          const mid = /^\d+$/.test(id) ? id : bidToMid(id) || id;
           let rootComments = [];
           let nextCursor = void 0;
           try {
-            let url = context.origin + "/comments/hotflow?id=" + encodeURIComponent(id) + "&mid=" + encodeURIComponent(id) + "&max_id_type=0";
+            let url = context.origin + "/comments/hotflow?id=" + encodeURIComponent(mid) + "&mid=" + encodeURIComponent(mid) + "&max_id_type=0";
             if (cursor && !cursor.startsWith("page_")) {
               url += "&max_id=" + encodeURIComponent(cursor);
             }
@@ -379,7 +358,7 @@
               context,
               credential.cookies,
               { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
-              false,
+              true,
               true
             );
             if (response && isOkResponse(response.ok) && isRecord(response.data)) {
@@ -398,13 +377,13 @@
           }
           if (!rootComments.length && !cursor) {
             try {
-              const showUrl = context.origin + "/api/comments/show?id=" + encodeURIComponent(id) + "&page=1";
+              const showUrl = context.origin + "/api/comments/show?id=" + encodeURIComponent(mid) + "&page=1";
               const response = await requestJson(
                 showUrl,
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
-                false,
+                true,
                 true
               );
               if (response && isOkResponse(response.ok) && isRecord(response.data)) {
@@ -422,13 +401,13 @@
           } else if (!rootComments.length && cursor && cursor.startsWith("page_")) {
             const pageNum = parseInt(cursor.replace("page_", ""), 10) || 1;
             try {
-              const showUrl = context.origin + "/api/comments/show?id=" + encodeURIComponent(id) + "&page=" + pageNum;
+              const showUrl = context.origin + "/api/comments/show?id=" + encodeURIComponent(mid) + "&page=" + pageNum;
               const response = await requestJson(
                 showUrl,
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(id) },
-                false,
+                true,
                 true
               );
               if (response && isOkResponse(response.ok) && isRecord(response.data)) {
@@ -463,12 +442,15 @@
         async mutate(request, context) {
           const credential = await readCredential();
           const st = await getCsrfToken(context, credential.cookies);
-          const rawId = request.key.id;
+          if (!st) {
+            fail("AuthenticationRequired", "\u65E0\u6CD5\u83B7\u53D6\u5FAE\u535A\u5B89\u5168\u51ED\u8BC1 (st)\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
+          }
+          const rawId = request.actionToken || request.key.id;
           const isComment = rawId.startsWith("comment_") || rawId.startsWith("comment-");
           let statusId = rawId;
           let commentId = "";
           if (isComment) {
-            const parts = rawId.split("_");
+            const parts = rawId.split(/[-_]/);
             if (parts.length >= 3) {
               statusId = parts[1];
               commentId = parts[2];
@@ -477,6 +459,7 @@
               statusId = commentId;
             }
           }
+          const numericStatusId = /^\d+$/.test(statusId) ? statusId : bidToMid(statusId) || statusId;
           if (isComment) {
             if (request.action === "Favourite") {
               const res = await requestFormPost(
@@ -519,7 +502,7 @@
             if (request.action === "Favourite") {
               const res = await requestFormPost(
                 context.origin + "/api/attitudes/create",
-                { id: statusId, attitude: "heart", st },
+                { id: numericStatusId, attitude: "heart", st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
@@ -532,7 +515,7 @@
             } else if (request.action === "Unfavourite") {
               const res = await requestFormPost(
                 context.origin + "/api/attitudes/destroy",
-                { id: statusId, attitude: "heart", st },
+                { id: numericStatusId, attitude: "heart", st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
@@ -546,7 +529,7 @@
               const content = request.parameters?.content || "\u8F6C\u53D1\u5FAE\u535A";
               const res = await requestFormPost(
                 context.origin + "/api/statuses/repost",
-                { id: statusId, mid: statusId, content, st },
+                { id: numericStatusId, mid: numericStatusId, content, st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
@@ -559,7 +542,7 @@
             } else if (request.action === "Bookmark") {
               await requestFormPost(
                 context.origin + "/api/statuses/createfav",
-                { id: statusId, st },
+                { id: numericStatusId, st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
@@ -568,7 +551,7 @@
             } else if (request.action === "Unbookmark") {
               await requestFormPost(
                 context.origin + "/api/statuses/destroyfav",
-                { id: statusId, st },
+                { id: numericStatusId, st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/detail/" + encodeURIComponent(statusId) }
@@ -577,7 +560,7 @@
             } else if (request.action === "Delete") {
               await requestFormPost(
                 context.origin + "/profile/delMyblog",
-                { mid: statusId, st },
+                { mid: numericStatusId, st },
                 context,
                 credential.cookies,
                 { Referer: context.origin + "/" }
@@ -735,6 +718,9 @@
       notification: {
         async page(request, context) {
           const credential = await readCredential();
+          if (!credential.cookies || !credential.cookies.some((c) => c.name === "SUB" && c.value)) {
+            fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
+          }
           const currentUserId = credential.profile.key.id;
           const host = accountHost(context);
           const filterId = request.filterId || "mention";
@@ -742,6 +728,7 @@
           const pageNum = cursor ? parseInt(cursor, 10) || 1 : 1;
           const items = [];
           let hasMore = false;
+          const defaultHeaders = { Referer: context.origin + "/" };
           if (filterId === "mention") {
             try {
               const url = context.origin + "/message/mentionsAt?page=" + pageNum;
@@ -749,12 +736,12 @@
                 url,
                 context,
                 credential.cookies,
-                { Referer: context.origin + "/message/at" },
-                false,
+                defaultHeaders,
+                true,
                 true
               );
               if (res && isOkResponse(res.ok)) {
-                const list = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.statuses) ? res.data.statuses : [];
+                const list = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.statuses) ? res.data.statuses : isRecord(res.data) && Array.isArray(res.data.data) ? res.data.data : [];
                 if (list.length > 0) {
                   hasMore = true;
                   for (const item of list) {
@@ -769,8 +756,11 @@
                     });
                   }
                 }
+              } else if (res && res.ok === -100) {
+                fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
               }
-            } catch {
+            } catch (e) {
+              if (isAuthenticationError(e)) throw e;
             }
           } else if (filterId === "comment") {
             try {
@@ -779,12 +769,12 @@
                 url,
                 context,
                 credential.cookies,
-                { Referer: context.origin + "/message/cmt" },
-                false,
+                defaultHeaders,
+                true,
                 true
               );
               if (res && isOkResponse(res.ok)) {
-                const list = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.comments) ? res.data.comments : [];
+                const list = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.comments) ? res.data.comments : isRecord(res.data) && Array.isArray(res.data.data) ? res.data.data : [];
                 if (list.length > 0) {
                   hasMore = true;
                   for (const c of list) {
@@ -840,8 +830,11 @@
                     });
                   }
                 }
+              } else if (res && res.ok === -100) {
+                fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
               }
-            } catch {
+            } catch (e) {
+              if (isAuthenticationError(e)) throw e;
             }
           } else if (filterId === "like") {
             try {
@@ -850,17 +843,17 @@
                 url,
                 context,
                 credential.cookies,
-                { Referer: context.origin + "/message/attitude" },
-                false,
+                defaultHeaders,
+                true,
                 true
               );
               if (res && isOkResponse(res.ok)) {
-                const list = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.attitudes) ? res.data.attitudes : [];
+                const list = Array.isArray(res.data) ? res.data : isRecord(res.data) && Array.isArray(res.data.attitudes) ? res.data.attitudes : isRecord(res.data) && Array.isArray(res.data.data) ? res.data.data : [];
                 if (list.length > 0) {
                   hasMore = true;
                   for (const a of list) {
                     if (!isRecord(a)) continue;
-                    const attitudeId = String(a.idStr || a.id || "");
+                    const attitudeId = String(a.idstr || a.idStr || a.id || "");
                     if (!attitudeId) continue;
                     const actor = isRecord(a.user) ? mapTimelineProfile(a.user, context) : void 0;
                     if (!actor) continue;
@@ -887,8 +880,11 @@
                     });
                   }
                 }
+              } else if (res && res.ok === -100) {
+                fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
               }
-            } catch {
+            } catch (e) {
+              if (isAuthenticationError(e)) throw e;
             }
           }
           const nextCursor = hasMore ? String(pageNum + 1) : void 0;
@@ -901,13 +897,16 @@
         async badge(request, context) {
           try {
             const credential = await readCredential();
+            if (!credential.cookies || !credential.cookies.some((c) => c.name === "SUB" && c.value)) {
+              return { value: 0 };
+            }
             const st = await getCsrfToken(context, credential.cookies).catch(() => void 0);
             const unreadUrl = context.origin + "/api/remind/unread?t=" + Date.now();
             const headers = {
               Referer: context.origin + "/"
             };
             if (st) {
-              headers["X-Xsrf-Token"] = st;
+              headers["X-XSRF-TOKEN"] = st;
             }
             const response = await requestJson(unreadUrl, context, credential.cookies, headers, true, true);
             if (response && isOkResponse(response.ok) && isRecord(response.data)) {
@@ -915,7 +914,8 @@
               const mentionStatus = typeof d.mention_status === "number" ? d.mention_status : 0;
               const cmt = typeof d.cmt === "number" ? d.cmt : 0;
               const attitude = typeof d.attitude === "number" ? d.attitude : 0;
-              return { value: mentionStatus + cmt + attitude };
+              const count = Math.min(1e4, Math.max(0, mentionStatus + cmt + attitude));
+              return { value: count };
             }
           } catch {
           }
@@ -1565,27 +1565,70 @@
       }
     };
   }
+  var B62_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  function b62Decode(str) {
+    let res = 0n;
+    for (let i = 0; i < str.length; i++) {
+      const idx = BigInt(B62_ALPHABET.indexOf(str[i]));
+      if (idx < 0n) return 0n;
+      res = res * 62n + idx;
+    }
+    return res;
+  }
+  function bidToMid(bid) {
+    if (!bid) return "";
+    const parts = [];
+    for (let i = bid.length; i > 0; i -= 4) {
+      const start = Math.max(0, i - 4);
+      const chunk = bid.slice(start, i);
+      let val = String(b62Decode(chunk));
+      if (start > 0) {
+        val = val.padStart(7, "0");
+      }
+      parts.unshift(val);
+    }
+    return parts.join("");
+  }
+  function mergeHeaders(...sources) {
+    const result = {};
+    const lowerMap = /* @__PURE__ */ new Map();
+    for (const src of sources) {
+      if (!src) continue;
+      for (const [key, value] of Object.entries(src)) {
+        if (value === void 0 || value === null) continue;
+        const lower = key.toLowerCase();
+        const existing = lowerMap.get(lower);
+        if (existing) {
+          delete result[existing];
+        }
+        lowerMap.set(lower, key);
+        result[key] = value;
+      }
+    }
+    return result;
+  }
   async function requestJson(url, context, cookies, extraHeaders = {}, allowUnauthorized = false, allowNotFound = false) {
     if (!isSameOrigin(url, context.origin)) {
       fail("Unsupported", "\u5FAE\u535A\u63A5\u53E3\u8DF3\u8F6C\u5230\u4E86\u6240\u9009\u8D26\u53F7\u7AD9\u70B9\u4E4B\u5916\uFF0C\u5DF2\u505C\u6B62\u8BF7\u6C42\u3002");
     }
+    const mergedHeaders = mergeHeaders(
+      DEFAULT_HEADERS,
+      { "Referer": context.origin + "/" },
+      extraHeaders
+    );
     let response;
     try {
       response = await flare.http.request({
         method: "GET",
         url,
         cookies,
-        headers: {
-          ...DEFAULT_HEADERS,
-          "Referer": context.origin + "/",
-          ...extraHeaders
-        }
+        headers: mergedHeaders
       });
     } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "host.unavailable") {
-        fail("Network", "Flare \u65E0\u6CD5\u8FDE\u63A5\u5FAE\u535A\u63A5\u53E3\u3002");
-      }
-      throw error;
+      if (isAuthenticationError(error)) throw error;
+      if (allowUnauthorized || allowNotFound) return null;
+      const msg = error && typeof error === "object" && "message" in error ? String(error.message) : "Flare \u65E0\u6CD5\u8FDE\u63A5\u5FAE\u535A\u63A5\u53E3\u3002";
+      fail("Network", msg);
     }
     if (response.status === 401 && allowUnauthorized) return null;
     if (response.status === 404 && allowNotFound) return null;
@@ -1601,7 +1644,11 @@
     } catch {
       fail("InvalidResponse", "\u5FAE\u535A\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE\u6709\u6548 JSON\u3002");
     }
-    return requiredObject(value);
+    const obj = requiredObject(value);
+    if (obj.ok === -100) {
+      fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
+    }
+    return obj;
   }
   var cachedSt = null;
   async function getCsrfToken(context, cookies) {
@@ -1629,32 +1676,33 @@
     }
     const xsrfHeaders = {};
     if (formValues.st) {
-      xsrfHeaders["X-Xsrf-Token"] = formValues.st;
       xsrfHeaders["X-XSRF-TOKEN"] = formValues.st;
     }
+    const mergedHeaders = mergeHeaders(
+      DEFAULT_HEADERS,
+      {
+        "Referer": context.origin + "/",
+        "X-Requested-With": "XMLHttpRequest"
+      },
+      xsrfHeaders,
+      extraHeaders
+    );
     let response;
     try {
       response = await flare.http.request({
         method: "POST",
         url,
         cookies,
-        headers: {
-          ...DEFAULT_HEADERS,
-          "Referer": extraHeaders["Referer"] || context.origin + "/",
-          "X-Requested-With": "XMLHttpRequest",
-          ...xsrfHeaders,
-          ...extraHeaders
-        },
+        headers: mergedHeaders,
         body: {
           type: "form",
           values: formValues
         }
       });
     } catch (error) {
-      if (error && typeof error === "object" && "code" in error && error.code === "host.unavailable") {
-        fail("Network", "Flare \u65E0\u6CD5\u8FDE\u63A5\u5FAE\u535A\u63A5\u53E3\u3002");
-      }
-      throw error;
+      if (isAuthenticationError(error)) throw error;
+      const msg = error && typeof error === "object" && "message" in error ? String(error.message) : "Flare \u65E0\u6CD5\u8FDE\u63A5\u5FAE\u535A\u63A5\u53E3\u3002";
+      fail("Network", msg);
     }
     if (response.status === 401 || response.status === 403) {
       cachedSt = null;
@@ -1664,21 +1712,23 @@
       cachedSt = null;
       fail("Remote", "\u5FAE\u535A\u63A5\u53E3\u8FD4\u56DE HTTP " + response.status + "\u3002");
     }
+    let value;
     try {
-      const value = JSON.parse(response.body);
-      if (isRecord(value)) {
-        if (value.ok !== void 0 && !isOkResponse(value.ok)) {
-          cachedSt = null;
-          const msg = typeof value.msg === "string" ? value.msg : "\u5FAE\u535A\u63A5\u53E3\u64CD\u4F5C\u5931\u8D25\u3002";
-          fail("Remote", msg);
-        }
-        return value;
-      }
-      return null;
-    } catch (err) {
-      if (isRecord(err) && typeof err.code === "string") throw err;
-      return null;
+      value = JSON.parse(response.body);
+    } catch {
+      fail("InvalidResponse", "\u5FAE\u535A\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE\u6709\u6548 JSON\u3002");
     }
+    const obj = requiredObject(value);
+    if (obj.ok === -100) {
+      cachedSt = null;
+      fail("AuthenticationRequired", "\u5FAE\u535A\u767B\u5F55\u72B6\u6001\u5DF2\u5931\u6548\uFF0C\u8BF7\u91CD\u65B0\u767B\u5F55\u3002");
+    }
+    if (obj.ok !== void 0 && !isOkResponse(obj.ok)) {
+      cachedSt = null;
+      const msg = typeof obj.msg === "string" ? obj.msg : "\u5FAE\u535A\u63A5\u53E3\u64CD\u4F5C\u5931\u8D25\u3002";
+      fail("Remote", msg);
+    }
+    return obj;
   }
   async function readCredential() {
     const value = await flare.credential.read();
@@ -1786,7 +1836,12 @@
     return message || "\u5FAE\u535A\u672A\u786E\u8BA4\u7B7E\u5230\u7ED3\u679C\u3002";
   }
   function isAuthenticationError(error) {
-    return isRecord(error) && error.code === "AuthenticationRequired";
+    if (!error) return false;
+    if (isRecord(error) && error.code === "AuthenticationRequired") return true;
+    if (isRecord(error.__flarePluginErrorV1) && error.__flarePluginErrorV1.code === "AuthenticationRequired") {
+      return true;
+    }
+    return false;
   }
   function isCookiePair(value) {
     return isRecord(value) && typeof value.name === "string" && typeof value.value === "string";
