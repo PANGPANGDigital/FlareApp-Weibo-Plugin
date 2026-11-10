@@ -14,10 +14,10 @@ Flare Social Plugin API v1 插件 —— 微博增强版。
 https://github.com/PANGPANGDigital/Flare-App-Plugin
 ```
 
-检查插件来源和媒体权限后确认安装。添加账号时选择平台 **`Weibo Enhance`**，Origin 填写 `https://m.weibo.cn`，通过微博网页登录。打开它的「最新微博Enhance」时间线并刷新即可触发签到检查和加载最新博文。
+检查插件来源和媒体权限后确认安装。插件自带高优先级服务探测器（Detector）：在 Flare「输入服务器以开始」输入 `https://m.weibo.cn`（或 `m.weibo.cn`），Flare 会自动匹配到带专属角标的 **`Weibo Enhance`** 平台卡片，点击登录即可通过微博网页登录。打开它的「最新微博Enhance」时间线并刷新即可触发签到检查和加载最新博文。
 
 ### 仓库布局
 
 `Weibo.Plugin/` 保留 TypeScript 源码和开发配置。Flare 安装器读取仓库根目录的 `manifest.json`、`plugin.js` 和 `assets/icon.png`；这些安装文件由子项目生成并同步到根目录。
 
-在 `Weibo.Plugin/` 目录运行 `npm run publish:root`，会构建插件并更新根目录安装文件。发布时保持根目录和子项目的 manifest 版本一致，并创建匹配版本的稳定 tag（例如 `0.2.2` 或 `v0.2.2`）。
+在 `Weibo.Plugin/` 目录运行 `npm run publish:root`，会构建插件并更新根目录安装文件。发布时保持根目录和子项目的 manifest 版本一致，并创建匹配版本的稳定 tag（例如 `0.2.3` 或 `v0.2.3`）。

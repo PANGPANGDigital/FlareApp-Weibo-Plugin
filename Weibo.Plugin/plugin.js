@@ -17,6 +17,56 @@
     "MWeibo-Pwa": "1"
   };
   defineFlareSocialPlugin({
+    detector: {
+      async detect(request, context) {
+        const origin = request.origin || context.origin || "https://m.weibo.cn";
+        const hostMatch = origin.match(/^https?:\/\/([^/:]+)/i);
+        const host = hostMatch ? hostMatch[1].toLowerCase() : "";
+        const isWeibo = host === "m.weibo.cn" || host.endsWith(".weibo.cn") || host === "weibo.cn" || host === "weibo.com" || host.endsWith(".weibo.com");
+        if (!isWeibo) {
+          return { match: "none", canonicalOrigin: origin };
+        }
+        try {
+          const response = await flare.http.request({
+            method: "GET",
+            url: origin + API_CONFIG_PATH,
+            headers: DEFAULT_HEADERS
+          });
+          if (response.status === 200) {
+            const body = JSON.parse(response.body);
+            if (body && (body.ok === 1 || body.data)) {
+              return {
+                match: "exact",
+                canonicalOrigin: "https://m.weibo.cn",
+                software: "Weibo Enhance",
+                instance: {
+                  domain: "m.weibo.cn",
+                  title: "Weibo Enhance",
+                  description: "\u5FAE\u535A\u589E\u5F3A\u7248 (\u652F\u6301\u8D85\u8BDD\u81EA\u52A8\u7B7E\u5230)"
+                }
+              };
+            }
+          }
+        } catch {
+          if (host === "m.weibo.cn") {
+            return {
+              match: "exact",
+              canonicalOrigin: "https://m.weibo.cn",
+              software: "Weibo Enhance",
+              instance: {
+                domain: "m.weibo.cn",
+                title: "Weibo Enhance",
+                description: "\u5FAE\u535A\u589E\u5F3A\u7248 (\u652F\u6301\u8D85\u8BDD\u81EA\u52A8\u7B7E\u5230)"
+              }
+            };
+          }
+        }
+        return {
+          match: "none",
+          canonicalOrigin: origin
+        };
+      }
+    },
     login: {
       browser: {
         async begin(_request, context) {
