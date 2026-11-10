@@ -918,7 +918,6 @@ defineFlareSocialPlugin({
                     url: context.origin + "/detail/" + encodeURIComponent(statusId || commentId),
                     ...(commentUser ? { author: commentUser } : {}),
                     actions: [
-                      { action: "Reply" as const, label: "回复", enabled: true, count: replyCount },
                       {
                         action: isCommentLiked ? ("Unfavourite" as const) : ("Favourite" as const),
                         label: isCommentLiked ? "已赞" : "赞",
@@ -927,6 +926,7 @@ defineFlareSocialPlugin({
                         count: likeCount,
                         actionToken: "comment_" + statusId + "_" + commentId,
                       },
+                      { action: "Reply" as const, label: "回复", enabled: true, count: replyCount },
                       ...(isAuthor
                         ? [
                             {
@@ -1424,12 +1424,6 @@ function mapTimelinePost(
         ]
       : []),
     {
-      action: "Reply" as const,
-      label: "评论",
-      enabled: true,
-      count: repliesCount,
-    },
-    {
       action: isLiked ? ("Unfavourite" as const) : ("Favourite" as const),
       label: isLiked ? "已赞" : "赞",
       enabled: true,
@@ -1441,6 +1435,12 @@ function mapTimelinePost(
       label: isFavorited ? "已收藏" : "收藏",
       enabled: true,
       active: isFavorited,
+    },
+    {
+      action: "Reply" as const,
+      label: "评论",
+      enabled: true,
+      count: repliesCount,
     },
     ...(isFromMe
       ? [
@@ -1794,18 +1794,18 @@ function mapCommentPost(
 
   const actions: ActionDescriptorV1[] = [
     {
-      action: "Reply",
-      label: "回复",
-      enabled: true,
-      count: replyCount,
-    },
-    {
       action: isCommentLiked ? "Unfavourite" : "Favourite",
       label: isCommentLiked ? "已赞" : "赞",
       enabled: true,
       active: isCommentLiked,
       count: likeCount,
       actionToken: "comment_" + commentId,
+    },
+    {
+      action: "Reply",
+      label: "回复",
+      enabled: true,
+      count: replyCount,
     },
     ...(isAuthor
       ? [

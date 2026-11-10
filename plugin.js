@@ -760,7 +760,6 @@
                       url: context.origin + "/detail/" + encodeURIComponent(statusId || commentId),
                       ...commentUser ? { author: commentUser } : {},
                       actions: [
-                        { action: "Reply", label: "\u56DE\u590D", enabled: true, count: replyCount },
                         {
                           action: isCommentLiked ? "Unfavourite" : "Favourite",
                           label: isCommentLiked ? "\u5DF2\u8D5E" : "\u8D5E",
@@ -769,6 +768,7 @@
                           count: likeCount,
                           actionToken: "comment_" + statusId + "_" + commentId
                         },
+                        { action: "Reply", label: "\u56DE\u590D", enabled: true, count: replyCount },
                         ...isAuthor ? [
                           {
                             action: "Delete",
@@ -1145,12 +1145,6 @@
         }
       ] : [],
       {
-        action: "Reply",
-        label: "\u8BC4\u8BBA",
-        enabled: true,
-        count: repliesCount
-      },
-      {
         action: isLiked ? "Unfavourite" : "Favourite",
         label: isLiked ? "\u5DF2\u8D5E" : "\u8D5E",
         enabled: true,
@@ -1162,6 +1156,12 @@
         label: isFavorited ? "\u5DF2\u6536\u85CF" : "\u6536\u85CF",
         enabled: true,
         active: isFavorited
+      },
+      {
+        action: "Reply",
+        label: "\u8BC4\u8BBA",
+        enabled: true,
+        count: repliesCount
       },
       ...isFromMe ? [
         {
@@ -1442,18 +1442,18 @@
     const subtitle = (optionalScalarText(c.region_name) || optionalScalarText(c.source) || "").replace(/<[^>]+>/g, "").trim();
     const actions = [
       {
-        action: "Reply",
-        label: "\u56DE\u590D",
-        enabled: true,
-        count: replyCount
-      },
-      {
         action: isCommentLiked ? "Unfavourite" : "Favourite",
         label: isCommentLiked ? "\u5DF2\u8D5E" : "\u8D5E",
         enabled: true,
         active: isCommentLiked,
         count: likeCount,
         actionToken: "comment_" + commentId
+      },
+      {
+        action: "Reply",
+        label: "\u56DE\u590D",
+        enabled: true,
+        count: replyCount
       },
       ...isAuthor ? [
         {
