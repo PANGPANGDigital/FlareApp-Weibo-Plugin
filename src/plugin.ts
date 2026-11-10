@@ -102,8 +102,7 @@ defineFlareSocialPlugin({
       async begin(_request, _context) {
         return {
           type: "webCookie",
-          startUrl:
-            "https://passport.weibo.com/sso/signin?entry=wapsso&source=wapssowb&url=https%3A%2F%2Fm.weibo.cn%2F",
+          startUrl: "https://m.weibo.cn/login?backURL=https%3A%2F%2Fm.weibo.cn%2F",
         };
       },
       async check(request, context) {
