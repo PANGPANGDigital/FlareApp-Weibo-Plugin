@@ -626,7 +626,7 @@
       return { items: [] };
     }
     const items = data.statuses.map((status) => mapTimelineStatus(status, context)).filter((item) => item !== void 0);
-    const rawCursor = data.next_cursor_str ?? data.next_cursor ?? data.since_id_str ?? data.since_id;
+    const rawCursor = data.max_id_str ?? data.max_id ?? data.next_cursor_str ?? data.next_cursor ?? data.since_id_str ?? data.since_id;
     const olderCursor = optionalScalarText(rawCursor);
     return {
       items,
